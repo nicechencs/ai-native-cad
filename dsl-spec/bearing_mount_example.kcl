@@ -1,0 +1,69 @@
+// AI-Native CAD-DSL 原型示例：带相切加强筋与圆周螺栓阵列的轻量化法兰轴承座
+// 演示特性：精确 B-Rep 配合面锁定 + 可微相切约束 + 圆周阵列 + 载荷驱动隐式平滑融合
+
+@unit("mm")
+@material("Al-6061-T6")
+@manufacturing(method = "CNC_3AXIS_AND_MILL", min_tool_radius = 1.5)
+
+part LightweightBearingMount(
+    bore_diameter: f64 = 42.0 @tolerance("H7"),   // 精密轴承配合内孔（锁定精确解析圆柱面）
+    flange_od: f64 = 110.0,
+    base_thickness: f64 = 10.0,
+    hub_height: f64 = 48.0,
+    rib_count: u32 = 6,
+    axial_load_n: f64 = 1500.0
+) {
+    // 1. 精确解析特征轨（Exact B-Rep）：法兰底盘与中心轴承座
+    let flange = cylinder(d = flange_od, h = base_thickness, center = [0, 0, 0])
+    let hub = cylinder(d = bore_diameter + 16.0, h = hub_height, center = [0, 0, 0])
+
+    // 2. 拓扑语义选择与相切加强筋（无惧尺寸修改的语义查询，告别传统 Face_ID 断裂）
+    let top_flange_face = flange.faces().filter(normal = +Z).top()
+    let outer_hub_surface = hub.faces().cylindrical().outer()
+
+    let single_rib = sketch(plane = XZ_PLANE) {
+        let p1 = point(x = (bore_diameter + 16.0) / 2.0, z = hub_height - 4.0)
+        let p2 = point(x = flange_od / 2.0 - 8.0, z = base_thickness)
+        line(from = p1, to = p2)
+        // 可微几何约束：强制加强筋外缘与轴承座外壁光滑相切过渡
+        constraint::tangent(target = outer_hub_surface, at = p1)
+    }
+    |> extrude_symmetric(thickness = 6.0)
+
+    // 3. 圆周阵列算子
+    let ribs = array::polar(
+        feature = single_rib,
+        axis = Z_AXIS,
+        count = rib_count
+    )
+
+    // 4. 混合隐式平滑合并（永不报错的应力自适应变半径圆角融合）
+    let body_solid = implicit::smooth_union(
+        items = [flange, hub, ribs],
+        blend_radius = field::stress_driven(min = 2.0, max = 5.5)
+    )
+
+    // 5. 精确减材配合特征（锁定原生 B-Rep 圆柱公差面，禁止网格化近似）
+    let bolt_circle_holes = hole::counterbore(
+        d_through = 6.6,
+        d_cbore = 11.0,
+        depth_cbore = 6.2
+    )
+    |> array::polar(axis = Z_AXIS, radius = 44.0, count = rib_count, angle_offset = 30.0deg)
+
+    let bearing_bore = cylinder(d = bore_diameter, h = hub_height + 2.0, exact_brep = true)
+
+    let final_part = body_solid
+        |> boolean::subtract([bearing_bore, bolt_circle_holes], preserve_exact_interfaces = true)
+
+    // 6. 内嵌物理与工艺硬断言（AI Agent 自检门禁）
+    assert::physics(
+        target = final_part,
+        fixed = final_part.faces().filter(normal = -Z).bottom(),
+        load = force(surface = bearing_bore, vector = [0, 0, -axial_load_n]),
+        min_safety_factor = 2.5
+    )
+    assert::dfm_accessible(target = final_part, axes = [+Z, -Z])
+
+    return final_part
+}
