@@ -1,0 +1,18 @@
+{
+  "name": "ai-native-cad-workbench",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "L5 Modern Hybrid CAD Workbench (TypeScript / React 19 / Monaco / Tauri v2)",
+  "packageManager": "pnpm@9.4.0",
+  "scripts": {
+    "dev": "pnpm --filter @ai-native-cad/studio-ui dev",
+    "dev:server": "node apps/studio-ui/dev-server.mjs",
+    "build": "pnpm --filter @ai-native-cad/studio-ui build",
+    "typecheck": "pnpm --filter @ai-native-cad/studio-ui typecheck"
+  },
+  "engines": {
+    "node": ">=22.0.0",
+    "pnpm": ">=9.0.0"
+  }
+}

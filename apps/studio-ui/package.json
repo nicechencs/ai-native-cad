@@ -1,0 +1,28 @@
+{
+  "name": "@ai-native-cad/studio-ui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "L5 Three-Column AI-Native CAD Workbench UI (React 19 + Monaco + Three/WebGPU Viewport Shell)",
+  "scripts": {
+    "dev": "vite --port 5173",
+    "dev:server": "node dev-server.mjs",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --port 4173",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@monaco-editor/react": "^4.7.0",
+    "monaco-editor": "^0.52.2",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.0",
+    "@types/react": "^19.0.10",
+    "@types/react-dom": "^19.0.4",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "^5.8.2",
+    "vite": "^6.2.0"
+  }
+}

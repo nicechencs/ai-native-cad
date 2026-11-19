@@ -1,0 +1,207 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-native-cad.local/schemas/scene-mesh.schema.json",
+  "title": "Scene Mesh and AST Bidirectional Mapping Payload",
+  "description": "Tessellated B-Rep viewport payload with per-face/edge provenance tags, component BOM metadata, source AST spans, and Tier 1/2/3 editable handles.",
+  "type": "object",
+  "required": ["format_version", "part_name", "units", "faces", "edges", "edit_handles"],
+  "additionalProperties": true,
+  "properties": {
+    "format_version": {
+      "type": "string",
+      "const": "0.1"
+    },
+    "part_name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "kind": {
+      "type": "string",
+      "enum": ["part", "assembly"],
+      "default": "part",
+      "description": "Distinguishes a single solid part from a multi-component assembly."
+    },
+    "units": {
+      "type": "string",
+      "enum": ["mm", "m", "in"]
+    },
+    "components": {
+      "type": "array",
+      "description": "Placed component instances when kind == 'assembly'; omitted for a single part. Bounding boxes are in world coordinates.",
+      "items": { "$ref": "#/$defs/component_meta" }
+    },
+    "faces": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "face_id",
+          "surface_type",
+          "vertices",
+          "normals",
+          "indices",
+          "provenance_tags",
+          "ast_span"
+        ],
+        "additionalProperties": true,
+        "properties": {
+          "face_id": { "type": "string", "minLength": 1 },
+          "surface_type": {
+            "type": "string",
+            "enum": ["plane", "cylinder", "cone", "sphere", "torus", "bspline", "mesh"]
+          },
+          "vertices": {
+            "type": "array",
+            "description": "Flat vertex positions [x0, y0, z0, x1, y1, z1, ...].",
+            "items": { "type": "number" }
+          },
+          "normals": {
+            "type": "array",
+            "description": "Flat per-vertex unit normals [nx0, ny0, nz0, ...].",
+            "items": { "type": "number" }
+          },
+          "indices": {
+            "type": "array",
+            "description": "Triangle index buffer (stride 3).",
+            "items": { "type": "integer", "minimum": 0 }
+          },
+          "provenance_tags": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "exact_interface": {
+            "type": "boolean",
+            "default": false
+          },
+          "component_id": {
+            "type": "string",
+            "description": "Owning assembly component identifier if part of an assembly."
+          },
+          "part_name": {
+            "type": "string"
+          },
+          "ast_span": { "$ref": "#/$defs/source_span" }
+        }
+      }
+    },
+    "edges": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["edge_id", "curve_type", "polyline", "provenance_tags", "ast_span"],
+        "additionalProperties": true,
+        "properties": {
+          "edge_id": { "type": "string", "minLength": 1 },
+          "curve_type": {
+            "type": "string",
+            "enum": ["line", "circle", "arc", "ellipse", "bspline", "polyline"]
+          },
+          "polyline": {
+            "description": "Sampled 3D polyline points as [[x, y, z], ...] or flat [x0, y0, z0, ...].",
+            "anyOf": [
+              {
+                "type": "array",
+                "items": { "$ref": "#/$defs/vec3" }
+              },
+              {
+                "type": "array",
+                "items": { "type": "number" }
+              }
+            ]
+          },
+          "provenance_tags": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "component_id": {
+            "type": "string",
+            "description": "Owning assembly component identifier if part of an assembly."
+          },
+          "ast_span": { "$ref": "#/$defs/source_span" }
+        }
+      }
+    },
+    "edit_handles": {
+      "type": "array",
+      "description": "Interactive viewport handles mapped to Tier 1/2/3 AST writeback policies.",
+      "items": {
+        "type": "object",
+        "required": [
+          "handle_id",
+          "param_name",
+          "tier",
+          "current_value",
+          "unit",
+          "ast_span"
+        ],
+        "additionalProperties": true,
+        "properties": {
+          "handle_id": { "type": "string", "minLength": 1 },
+          "param_name": { "type": "string", "minLength": 1 },
+          "tier": {
+            "type": "integer",
+            "enum": [1, 2, 3],
+            "description": "1 = direct literal/param, 2 = affine single-var offset, 3 = coupled expression (read-only lock + extract)."
+          },
+          "current_value": { "type": "number" },
+          "unit": { "type": "string" },
+          "ast_span": { "$ref": "#/$defs/source_span" },
+          "anchor_point": { "$ref": "#/$defs/vec3" },
+          "drag_axis": { "$ref": "#/$defs/vec3" },
+          "min_value": { "type": "number" },
+          "max_value": { "type": "number" },
+          "upstream_param": { "type": "string" },
+          "offset_value": { "type": "number" },
+          "expression": { "type": "string" },
+          "component_id": { "type": "string" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "vec3": {
+      "type": "array",
+      "items": { "type": "number" },
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "bbox3": {
+      "type": "object",
+      "required": ["min", "max"],
+      "additionalProperties": false,
+      "properties": {
+        "min": { "$ref": "#/$defs/vec3" },
+        "max": { "$ref": "#/$defs/vec3" }
+      }
+    },
+    "component_meta": {
+      "type": "object",
+      "required": ["component_id", "part_name"],
+      "additionalProperties": true,
+      "properties": {
+        "component_id": { "type": "string", "minLength": 1 },
+        "part_name": { "type": "string", "minLength": 1 },
+        "instance_name": { "type": "string" },
+        "origin_mm": { "$ref": "#/$defs/vec3" },
+        "rotation_deg": { "$ref": "#/$defs/vec3" },
+        "volume_mm3": { "type": "number", "minimum": 0 },
+        "bbox_mm": { "$ref": "#/$defs/bbox3" },
+        "face_count": { "type": "integer", "minimum": 0 },
+        "material": { "type": "string" }
+      }
+    },
+    "source_span": {
+      "type": "object",
+      "required": ["start_line", "start_col", "end_line", "end_col"],
+      "additionalProperties": true,
+      "properties": {
+        "start_line": { "type": "integer", "minimum": 0 },
+        "start_col": { "type": "integer", "minimum": 0 },
+        "end_line": { "type": "integer", "minimum": 0 },
+        "end_col": { "type": "integer", "minimum": 0 },
+        "byte_start": { "type": "integer", "minimum": 0 },
+        "byte_end": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

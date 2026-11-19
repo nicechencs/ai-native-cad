@@ -1,0 +1,61 @@
+# Rust
+target/
+**/*.rs.bk
+*.pdb
+
+# Node / Frontend / Tauri
+node_modules/
+dist/
+dist-ssr/
+.pnpm-store/
+*.local
+*.tsbuildinfo
+
+# Python / AI Services
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# C++ / CMake / Prebuilt OCCT (LGPL-2.1 dynamic runtime)
+build/
+out/
+cmake-build-*/
+cpp/occt-prebuilt/
+
+# Temporary CAD build & export artifacts
+*.step
+*.stp
+*.stl
+*.3mf
+*.iges
+*.igs
+*.mesh.json
+*.diagnostics.json
+*.dxf
+*.pdf
+tmp_out/
+artifacts_out/
+
+# IDE & OS
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+
+# Explicitly keep specs and golden KCL examples
+!examples/
+!examples/**
+!dsl-spec/
+!dsl-spec/**
+!schemas/
+!schemas/**

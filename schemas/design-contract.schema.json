@@ -1,0 +1,186 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-native-cad.local/schemas/design-contract.schema.json",
+  "title": "Engineering Design Contract",
+  "description": "Structured engineering design contract produced by SpecParserAgent and enforced across CAD-DSL generation and L0-L4 verification gates.",
+  "type": "object",
+  "required": [
+    "part_name",
+    "units",
+    "material",
+    "manufacturing_method",
+    "keep_in_bbox_mm",
+    "keep_out_zones",
+    "interfaces",
+    "loads"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "contract_version": {
+      "type": "string",
+      "default": "0.1"
+    },
+    "part_name": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[A-Za-z][A-Za-z0-9_]*$",
+      "description": "PascalCase or snake_case identifier matching the target CAD-DSL part declaration."
+    },
+    "summary": {
+      "type": "string",
+      "description": "Human-readable engineering intent summary."
+    },
+    "units": {
+      "description": "Unit system for contract fields and generated CAD-DSL @unit annotation.",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["length"],
+          "properties": {
+            "length": { "type": "string", "enum": ["mm", "m", "in"] },
+            "angle": { "type": "string", "enum": ["deg", "rad"], "default": "deg" },
+            "force": { "type": "string", "enum": ["N", "kN"], "default": "N" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "string",
+          "enum": ["mm", "m", "in"]
+        }
+      ]
+    },
+    "material": {
+      "description": "Engineering material designation or structured material specification.",
+      "oneOf": [
+        { "type": "string", "minLength": 1 },
+        {
+          "type": "object",
+          "required": ["name"],
+          "properties": {
+            "name": { "type": "string", "minLength": 1 },
+            "yield_strength_mpa": { "type": "number", "exclusiveMinimum": 0 },
+            "elastic_modulus_gpa": { "type": "number", "exclusiveMinimum": 0 },
+            "density_g_cm3": { "type": "number", "exclusiveMinimum": 0 }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "manufacturing_method": {
+      "type": "string",
+      "enum": [
+        "CNC_3AXIS_MILLING",
+        "CNC_5AXIS_MILLING",
+        "CNC_TURNING",
+        "LASER_CUTTING",
+        "SHEET_METAL_BENDING",
+        "ADDITIVE_FDM",
+        "ADDITIVE_SLM",
+        "INJECTION_MOLDING",
+        "CASTING"
+      ],
+      "description": "Primary manufacturing process constraining DFM assertions."
+    },
+    "dfm_constraints": {
+      "type": "object",
+      "properties": {
+        "min_tool_radius_mm": { "type": "number", "minimum": 0 },
+        "min_wall_thickness_mm": { "type": "number", "minimum": 0 },
+        "accessible_axes": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["+X", "-X", "+Y", "-Y", "+Z", "-Z"] }
+        }
+      },
+      "additionalProperties": true
+    },
+    "keep_in_bbox_mm": {
+      "type": "object",
+      "description": "Maximum allowed bounding envelope in millimeters.",
+      "required": ["min", "max"],
+      "properties": {
+        "min": { "$ref": "#/$defs/vec3" },
+        "max": { "$ref": "#/$defs/vec3" }
+      },
+      "additionalProperties": false
+    },
+    "keep_out_zones": {
+      "type": "array",
+      "description": "Clearance volumes (tool access, fastener swing, moving components) that must have zero intersection with the solid.",
+      "items": {
+        "type": "object",
+        "required": ["zone_id", "kind"],
+        "properties": {
+          "zone_id": { "type": "string", "minLength": 1 },
+          "kind": { "type": "string", "enum": ["box", "cylinder", "sphere"] },
+          "origin_mm": { "$ref": "#/$defs/vec3" },
+          "axis": { "type": "string", "enum": ["+X", "-X", "+Y", "-Y", "+Z", "-Z", "X_AXIS", "Y_AXIS", "Z_AXIS"] },
+          "size_mm": { "$ref": "#/$defs/vec3" },
+          "diameter_mm": { "type": "number", "exclusiveMinimum": 0 },
+          "height_mm": { "type": "number", "exclusiveMinimum": 0 },
+          "description": { "type": "string" }
+        },
+        "additionalProperties": true
+      }
+    },
+    "interfaces": {
+      "type": "array",
+      "description": "Precision mechanical mating features, bolt patterns, datums, and tolerances.",
+      "items": {
+        "type": "object",
+        "required": ["interface_id", "kind"],
+        "properties": {
+          "interface_id": { "type": "string", "minLength": 1 },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "bore",
+              "shaft_seat",
+              "mounting_face",
+              "bolt_pattern",
+              "counterbore_pattern",
+              "slot",
+              "datum"
+            ]
+          },
+          "nominal_mm": { "type": "number" },
+          "diameter_mm": { "type": "number", "exclusiveMinimum": 0 },
+          "pitch_circle_diameter_mm": { "type": "number", "exclusiveMinimum": 0 },
+          "count": { "type": "integer", "minimum": 1 },
+          "tolerance": { "type": "string" },
+          "roughness": { "type": "string" },
+          "datum_ref": { "type": "string" },
+          "normal": { "type": "string", "enum": ["+X", "-X", "+Y", "-Y", "+Z", "-Z"] },
+          "preserve_exact_brep": { "type": "boolean", "default": true },
+          "notes": { "type": "string" }
+        },
+        "additionalProperties": true
+      }
+    },
+    "loads": {
+      "type": "array",
+      "description": "Structural boundary conditions and external loads.",
+      "items": {
+        "type": "object",
+        "required": ["load_id", "kind"],
+        "properties": {
+          "load_id": { "type": "string", "minLength": 1 },
+          "kind": { "type": "string", "enum": ["force", "torque", "pressure", "fixed_support"] },
+          "target_interface": { "type": "string" },
+          "magnitude": { "type": "number" },
+          "unit": { "type": "string", "enum": ["N", "kN", "N*m", "MPa"] },
+          "vector": { "$ref": "#/$defs/vec3" },
+          "min_safety_factor": { "type": "number", "exclusiveMinimum": 0 }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "$defs": {
+    "vec3": {
+      "type": "array",
+      "items": { "type": "number" },
+      "minItems": 3,
+      "maxItems": 3
+    }
+  }
+}

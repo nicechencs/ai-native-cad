@@ -1,0 +1,21 @@
+[package]
+name = "cad-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "cad-cli"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+cad-evaluator.workspace = true
+cad-hir.workspace = true
+cad-kernel-occt.workspace = true
+cad-lsp.workspace = true
+cad-render.workspace = true
+cad-syntax.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true

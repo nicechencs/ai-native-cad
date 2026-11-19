@@ -1,0 +1,22 @@
+[package]
+name = "ai-native-cad-desktop"
+version = "0.1.0"
+edition = "2024"
+description = "Tauri v2 desktop host shell for AI-Native CAD Studio Workbench"
+license = "Apache-2.0"
+
+# Isolate this Tauri desktop crate from the repository root Cargo workspace
+# to avoid workspace membership conflicts during `cargo test --workspace`.
+[workspace]
+
+[features]
+default = []
+occt-ffi = []
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [] }

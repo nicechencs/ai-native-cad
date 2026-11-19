@@ -1,0 +1,14 @@
+[package]
+name = "cad-kernel-occt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+occt-ffi = []
+
+[dependencies]
+cad-syntax.workspace = true
+serde.workspace = true
+thiserror.workspace = true

@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cad-agent"
+version = "0.1.0"
+description = "L4 Multi-Agent Orchestration and Self-Refinement Loop for AI-Native CAD"
+requires-python = ">=3.12"
+license = { text = "Apache-2.0" }
+authors = [
+    { name = "AI-Native CAD Team" }
+]
+dependencies = []
+
+[project.optional-dependencies]
+llm = [
+    "openai>=1.0.0",
+    "google-genai>=1.0.0",
+]
+
+[project.scripts]
+cad-agent = "cad_agent.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

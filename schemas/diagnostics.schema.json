@@ -1,0 +1,171 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-native-cad.local/schemas/diagnostics.schema.json",
+  "title": "CAD-CLI Check and Build Diagnostics Output",
+  "description": "JSON output contract emitted by `cad-cli check <file> --json` and `cad-cli build <file> --json`.",
+  "type": "object",
+  "required": ["status", "file", "diagnostics", "metrics"],
+  "additionalProperties": true,
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["ok", "error"],
+      "description": "Overall compilation and L0-L2 gate status."
+    },
+    "file": {
+      "type": "string",
+      "description": "Path to the evaluated .kcl source file."
+    },
+    "part_name": {
+      "type": "string",
+      "description": "Evaluated part or assembly identifier if parsed."
+    },
+    "kind": {
+      "type": "string",
+      "enum": ["part", "assembly"],
+      "default": "part",
+      "description": "Distinguishes a single solid part from a multi-component assembly."
+    },
+    "diagnostics": {
+      "type": "array",
+      "description": "Compiler, dimensional type, topology disambiguation, constraint solver, or B-Rep gate diagnostics.",
+      "items": {
+        "type": "object",
+        "required": ["code", "severity", "message", "span"],
+        "additionalProperties": true,
+        "properties": {
+          "code": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Stable diagnostic code, e.g. E002_SYNTAX_ERROR, E102_UNIT_MISMATCH, E201_AMBIGUOUS_TOPOLOGY, E205_INVALID_FILLET_CHAMFER, E206_INVALID_SHELL_THICKNESS, E207_INVALID_FEATURE, E208_INVALID_ASSEMBLY_MATE, E209_INVALID_THREAD_SPEC, E301_NON_WATERTIGHT."
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["error", "warning", "info"]
+          },
+          "message": {
+            "type": "string"
+          },
+          "hint": {
+            "type": "string"
+          },
+          "rule_layer": {
+            "type": "string",
+            "enum": ["L0", "L1", "L2", "L3", "L4"]
+          },
+          "span": {
+            "$ref": "#/$defs/source_span"
+          }
+        }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "required": ["watertight", "volume_mm3", "bbox_mm", "face_count", "edge_count"],
+      "additionalProperties": true,
+      "properties": {
+        "watertight": {
+          "type": "boolean",
+          "description": "True when the resulting B-Rep / mesh forms a closed manifold solid with zero unpaired half-edges."
+        },
+        "volume_mm3": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Computed solid volume in cubic millimeters (0.0 on compile failure)."
+        },
+        "surface_area_mm2": {
+          "type": "number",
+          "minimum": 0
+        },
+        "bbox_mm": {
+          "type": "object",
+          "required": ["min", "max"],
+          "additionalProperties": false,
+          "properties": {
+            "min": { "$ref": "#/$defs/vec3" },
+            "max": { "$ref": "#/$defs/vec3" }
+          }
+        },
+        "face_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "edge_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "open_edge_count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of unpaired directed half-edges (must be 0 for watertight manifold solids)."
+        },
+        "compile_time_ms": {
+          "type": "number",
+          "minimum": 0
+        },
+        "kernel_backend": {
+          "type": "string",
+          "description": "Active geometry backend (e.g. 'pure-rust-analytic-brep', 'occt-dynamic')."
+        }
+      }
+    },
+    "components": {
+      "type": "array",
+      "description": "BOM component instances when kind == 'assembly'.",
+      "items": {
+        "type": "object",
+        "required": ["component_id", "part_name"],
+        "additionalProperties": true,
+        "properties": {
+          "component_id": { "type": "string", "minLength": 1 },
+          "part_name": { "type": "string", "minLength": 1 },
+          "origin_mm": { "$ref": "#/$defs/vec3" },
+          "rotation_deg": { "$ref": "#/$defs/vec3" },
+          "volume_mm3": { "type": "number", "minimum": 0 },
+          "bbox_mm": {
+            "type": "object",
+            "required": ["min", "max"],
+            "additionalProperties": false,
+            "properties": {
+              "min": { "$ref": "#/$defs/vec3" },
+              "max": { "$ref": "#/$defs/vec3" }
+            }
+          }
+        }
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "description": "Optional paths written by `cad-cli build`.",
+      "properties": {
+        "step_path": { "type": "string" },
+        "mesh_path": { "type": "string" },
+        "views_dir": { "type": "string" },
+        "dxf_path": { "type": "string" },
+        "drawing_path": { "type": "string" }
+      },
+      "additionalProperties": true
+    }
+  },
+  "$defs": {
+    "vec3": {
+      "type": "array",
+      "items": { "type": "number" },
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "source_span": {
+      "type": "object",
+      "required": ["start_line", "start_col", "end_line", "end_col"],
+      "additionalProperties": true,
+      "properties": {
+        "start_line": { "type": "integer", "minimum": 0 },
+        "start_col": { "type": "integer", "minimum": 0 },
+        "end_line": { "type": "integer", "minimum": 0 },
+        "end_col": { "type": "integer", "minimum": 0 },
+        "byte_start": { "type": "integer", "minimum": 0 },
+        "byte_end": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}
