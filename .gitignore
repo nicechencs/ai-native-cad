@@ -8,6 +8,7 @@ node_modules/
 dist/
 dist-ssr/
 .pnpm-store/
+.bundle-stage/
 *.local
 *.tsbuildinfo
 

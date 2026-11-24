@@ -22,7 +22,7 @@ import {
 } from "./sync/cadSessionTransport.ts";
 import { HlodChunkStreamer } from "./sync/hlodStreamer.ts";
 import { createWorkbenchBackend, type WorkbenchBackend } from "./sync/workbenchBackend.ts";
-import type { CacheStatus, GraphPatch, ParameterDef } from "./types/graphIr.ts";
+import type { CacheStatus, CanonicalGraph, GraphPatch, ParameterDef } from "./types/graphIr.ts";
 import type { SceneMeshPayload } from "./types/scene.ts";
 import { createProgressiveViewportController } from "./utils/hlodViewportBridge.ts";
 
@@ -274,6 +274,7 @@ function WorkbenchApp({ backend }: { readonly backend: WorkbenchBackend }) {
     selectedTopoRefs,
     applySemanticCommands,
     dispatchSemanticCommand,
+    getStore,
   } = useEngineeringSession();
   const graphCacheStatus: CacheStatus = revision === 0 ? "fresh_exact_match" : "graph_modified";
   // Toasts stay in WorkbenchLayout. This log is the feature-tree notice source.
@@ -343,14 +344,30 @@ function WorkbenchApp({ backend }: { readonly backend: WorkbenchBackend }) {
     logNotice("info", notice.title, notice.detail, "装配树");
   }, [logNotice]);
 
+  const [pendingEdit, setPendingEdit] = useState<{
+    patch: GraphPatch;
+    graph: CanonicalGraph | null;
+    projectPath: string;
+  } | null>(null);
+  const pendingGraphPatch = pendingEdit?.projectPath === activeProjectPath && pendingEdit.graph === graphIr
+    ? pendingEdit.patch
+    : null;
+
+  const queueGraphPatch = useCallback((patch: GraphPatch) => {
+    if (activeProjectPath) {
+      setPendingEdit({ patch, graph: getStore().state.graphIr, projectPath: activeProjectPath });
+    }
+  }, [activeProjectPath, getStore]);
+
   const onEmitGraphPatch = useCallback((patch: GraphPatch) => {
     try {
       applySemanticCommands([{ op: "apply_graph_patch", patch }], patch.description);
+      queueGraphPatch(patch);
       logNotice("info", patchNoticeTitle(patch));
     } catch (err) {
       logNotice("error", "特征图补丁未应用", err instanceof Error ? err.message : String(err), "特征图", actionTraceId(err));
     }
-  }, [applySemanticCommands, logNotice]);
+  }, [applySemanticCommands, logNotice, queueGraphPatch]);
 
   const onSelectGraphNode = useCallback((nodeId: string, failedTopoRefs: readonly string[]) => {
     dispatchSemanticCommand({ op: "select", nodeId, topoRefs: failedTopoRefs, nodeIds: [nodeId] });
@@ -359,29 +376,47 @@ function WorkbenchApp({ backend }: { readonly backend: WorkbenchBackend }) {
   const onRenameNode = useCallback((nodeId: string, name: string) => {
     try {
       dispatchSemanticCommand({ op: "rename_node", nodeId, name });
+      queueGraphPatch({
+        patch_id: `rename-node:${nodeId}`,
+        description: `Rename ${nodeId}`,
+        ops: [{ op: "update_node", value: { id: nodeId, name, inputs: null, kind: null } }],
+      });
       logNotice("info", `已重命名 ${nodeId}`);
     } catch (err) {
       logNotice("error", "重命名失败", err instanceof Error ? err.message : String(err));
     }
-  }, [dispatchSemanticCommand, logNotice]);
+  }, [dispatchSemanticCommand, logNotice, queueGraphPatch]);
 
   const onSetNodeSuppressed = useCallback((nodeId: string, suppressed: boolean) => {
     try {
       dispatchSemanticCommand({ op: "set_node_suppressed", nodeId, suppressed });
+      queueGraphPatch({
+        patch_id: `toggle-suppress:${nodeId}`,
+        description: `${suppressed ? "Suppress" : "Unsuppress"} ${nodeId}`,
+        ops: [{
+          op: "set_node_state",
+          value: { id: nodeId, state: { status: suppressed ? "suppressed" : "stale" } },
+        }],
+      });
       logNotice("info", suppressed ? `已抑制 ${nodeId}` : `已取消抑制 ${nodeId}，节点待重算`);
     } catch (err) {
       logNotice("error", "抑制状态未更新", err instanceof Error ? err.message : String(err));
     }
-  }, [dispatchSemanticCommand, logNotice]);
+  }, [dispatchSemanticCommand, logNotice, queueGraphPatch]);
 
   const onUpsertParameter = useCallback((value: ParameterDef) => {
     try {
       dispatchSemanticCommand({ op: "upsert_parameter", value });
+      queueGraphPatch({
+        patch_id: `update-parameter:${value.name}`,
+        description: `Update parameter ${value.name}`,
+        ops: [{ op: "upsert_parameter", value }],
+      });
       logNotice("info", `已更新参数 ${value.name}`);
     } catch (err) {
       logNotice("error", "参数未更新", err instanceof Error ? err.message : String(err));
     }
-  }, [dispatchSemanticCommand, logNotice]);
+  }, [dispatchSemanticCommand, logNotice, queueGraphPatch]);
 
   const onJumpToViolation = useCallback((target: { readonly nodeId: string | null; readonly topoRef: string | null }) => {
     dispatchSemanticCommand({
@@ -402,6 +437,9 @@ function WorkbenchApp({ backend }: { readonly backend: WorkbenchBackend }) {
   const onSyncRemotePatch = useCallback((patch: GraphPatch) => {
     return syncRemotePatchWithFallback(activeProjectPath ?? "", patch).then((result) => {
       if (result.projectPath) setActiveProjectPath(result.projectPath);
+      if (result.mode === "remote") {
+        setPendingEdit((current) => current?.patch === patch ? null : current);
+      }
       logNotice(result.accepted ? "info" : "error", result.notice, undefined, "特征图", result.traceId);
     });
   }, [activeProjectPath, logNotice]);
@@ -413,6 +451,7 @@ function WorkbenchApp({ backend }: { readonly backend: WorkbenchBackend }) {
     highlightedTopoRefs: selectedTopoRefs,
     highlightedFailedTopoRefs: selectedTopoRefs,
     activeProjectPath,
+    pendingGraphPatch,
     patchNotice,
     patchTraceId,
     onEmitGraphPatch,
@@ -435,6 +474,7 @@ function WorkbenchApp({ backend }: { readonly backend: WorkbenchBackend }) {
     onSetNodeSuppressed,
     onSyncRemotePatch,
     onUpsertParameter,
+    pendingGraphPatch,
     patchNotice,
     patchTraceId,
     selectedNodeId,

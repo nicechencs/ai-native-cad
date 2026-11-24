@@ -142,6 +142,7 @@ export interface FeatureTreeMountValue {
   readonly onUpsertParameter?: (value: ParameterDef) => void;
   readonly onJumpToViolation?: (target: { readonly nodeId: string | null; readonly topoRef: string | null }) => void;
   readonly activeProjectPath?: string | null;
+  readonly pendingGraphPatch?: GraphPatch | null;
   readonly onInitRemoteProject?: (relativeDir: string, name: string) => void | Promise<void>;
   readonly onSyncRemotePatch?: (patch: GraphPatch) => void | Promise<void>;
 }
@@ -183,6 +184,7 @@ function resolveFeatureTreeMount(
     activeProjectPath: props.activeProjectPath !== undefined
       ? props.activeProjectPath
       : mounted?.activeProjectPath,
+    pendingGraphPatch: mounted?.pendingGraphPatch,
     onInitRemoteProject: props.onInitRemoteProject ?? mounted?.onInitRemoteProject,
     onSyncRemotePatch: props.onSyncRemotePatch ?? mounted?.onSyncRemotePatch,
   };
@@ -546,7 +548,7 @@ export function LeftPanel({
     () => `${featureTree.graphIr?.graph_id ?? "project"}.aicad`,
   );
   const [aicadName, setAicadName] = useState(() => featureTree.graphIr?.graph_id ?? "");
-  const [lastGraphPatch, setLastGraphPatch] = useState<GraphPatch | null>(null);
+  const pendingGraphPatch = featureTree.pendingGraphPatch;
   const [aicadBusy, setAicadBusy] = useState(false);
   const [modelSubTab, setModelSubTab] = useState<"browser" | "graph">(initialUiPrefs.modelSubTab);
   const [checksSubTab, setChecksSubTab] = useState<"diagnostics" | "contract">(initialUiPrefs.checksSubTab);
@@ -654,11 +656,7 @@ export function LeftPanel({
   };
 
   const emitGraphPatch = (patch: GraphPatch) => {
-    setLastGraphPatch(patch);
     featureTree.onEmitGraphPatch?.(patch);
-    if (featureTree.activeProjectPath && featureTree.onSyncRemotePatch) {
-      void featureTree.onSyncRemotePatch(patch);
-    }
   };
 
   const showAicadActions = Boolean(featureTree.onInitRemoteProject || featureTree.onSyncRemotePatch);
@@ -995,12 +993,12 @@ export function LeftPanel({
                       <button
                         type="button"
                         className="pill-btn"
-                        disabled={aicadBusy || !featureTree.onSyncRemotePatch || !lastGraphPatch}
-                        title={lastGraphPatch ? "把最近一次特征图补丁写入 .aicad" : "先修改特征图，再同步补丁"}
+                        disabled={aicadBusy || !featureTree.activeProjectPath || !featureTree.onSyncRemotePatch || !pendingGraphPatch}
+                        title={pendingGraphPatch ? "把最近一次特征图补丁写入 .aicad" : "先修改特征图，再同步补丁"}
                         onClick={() => {
                           const sync = featureTree.onSyncRemotePatch;
-                          if (!sync || !lastGraphPatch) return;
-                          runAicadAction(() => sync(lastGraphPatch));
+                          if (!sync || !pendingGraphPatch) return;
+                          runAicadAction(() => sync(pendingGraphPatch));
                         }}
                       >
                         同步补丁

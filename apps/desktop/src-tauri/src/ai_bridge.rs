@@ -28,6 +28,15 @@ pub const CLIENT_ABORTED: &str = "CLIENT_ABORTED";
 const PROGRESS_PREFIX: &str = "CAD_AGENT_PROGRESS:";
 const CONFIG_NAME: &str = "ai-config.json";
 
+static BUNDLED_RESOURCE_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// Register the Tauri bundle resource directory during app setup so installed
+/// Windows NSIS, macOS `.app`, and Linux AppImage builds can locate bundled
+/// `cad-cli` and `services/cad-agent` alongside `current_exe()`.
+pub fn register_resource_dir(dir: PathBuf) {
+    let _ = BUNDLED_RESOURCE_DIR.set(strip_verbatim_prefix(&dir));
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct AiConfigStatus {
     pub default_provider: String,
@@ -1200,6 +1209,12 @@ pub(crate) fn resolve_cad_cli_bin() -> Result<PathBuf, String> {
         candidates.push(dir.join("cad-cli.exe"));
         candidates.push(dir.join("cad-cli"));
     }
+    if let Some(res_dir) = BUNDLED_RESOURCE_DIR.get() {
+        candidates.push(res_dir.join("cad-cli.exe"));
+        candidates.push(res_dir.join("cad-cli"));
+        candidates.push(res_dir.join("bin").join("cad-cli.exe"));
+        candidates.push(res_dir.join("bin").join("cad-cli"));
+    }
     let repo = repo_root();
     for build in ["release", "debug"] {
         let dir = repo.join("target").join(build);
@@ -1470,6 +1485,9 @@ pub fn repo_root() -> PathBuf {
         && let Some(dir) = exe.parent()
     {
         seeds.push(dir.to_path_buf());
+    }
+    if let Some(res_dir) = BUNDLED_RESOURCE_DIR.get() {
+        seeds.push(res_dir.clone());
     }
     if let Ok(cwd) = std::env::current_dir() {
         seeds.push(cwd);

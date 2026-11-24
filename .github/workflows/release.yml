@@ -1,4 +1,4 @@
-name: Release Portable Bundles
+name: Release Installers & Portable Bundles
 
 on:
   push:
@@ -11,7 +11,7 @@ on:
         type: boolean
         default: true
       cli_only:
-        description: "Package cad-cli only (skip Tauri desktop workbench)"
+        description: "Package cad-cli only (skip Tauri desktop workbench & installers)"
         type: boolean
         default: false
       publish_release:
@@ -42,12 +42,15 @@ jobs:
         include:
           - os: windows-latest
             target_name: windows-x64
+            stage_platform: windows
             archive_ext: zip
           - os: ubuntu-latest
             target_name: linux-x64
+            stage_platform: linux
             archive_ext: tar.gz
           - os: macos-14
             target_name: macos-arm64
+            stage_platform: macos
             archive_ext: tar.gz
 
     steps:
@@ -75,7 +78,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Determine packaging options
+      - name: Determine packaging options & release version
         id: opts
         shell: bash
         run: |
@@ -86,13 +89,21 @@ jobs:
             echo "with_occt=true" >> "$GITHUB_OUTPUT"
             echo "cli_only=false" >> "$GITHUB_OUTPUT"
           fi
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            TAG_VER="${{ github.ref_name }}"
+            TAG_VER="${TAG_VER#v}"
+            echo "release_version=$TAG_VER" >> "$GITHUB_OUTPUT"
+          else
+            echo "release_version=$PKG_VERSION" >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: Install Linux Tauri & CMake dependencies
+      - name: Install Linux Tauri & AppImage dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            cmake ninja-build g++ pkg-config libssl-dev \
+            cmake ninja-build g++ pkg-config libssl-dev file xdg-utils \
             libgl1-mesa-dev libxi-dev libxmu-dev \
             libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf
 
@@ -185,8 +196,10 @@ jobs:
             export OCCT_BRIDGE_LIB_DIR="$PWD/build/occt-bridge"
             if [[ "$(uname -s)" == "Darwin" ]]; then
               export DYLD_LIBRARY_PATH="$OCCT_BRIDGE_LIB_DIR:$PWD/cpp/occt-prebuilt/lib:${DYLD_LIBRARY_PATH:-}"
+              export RUSTFLAGS="-C link-arg=-Wl,-rpath,@executable_path -C link-arg=-Wl,-rpath,@executable_path/../Resources"
             else
               export LD_LIBRARY_PATH="$OCCT_BRIDGE_LIB_DIR:$PWD/cpp/occt-prebuilt/lib:${LD_LIBRARY_PATH:-}"
+              export RUSTFLAGS="-C link-arg=-Wl,-rpath,\$ORIGIN -C link-arg=-Wl,-rpath,\$ORIGIN/../lib -C link-arg=-Wl,-rpath,\$ORIGIN/.."
             fi
             ARGS+=(--with-occt)
           else
@@ -197,7 +210,7 @@ jobs:
           fi
           ./scripts/package-release.sh "${ARGS[@]}"
 
-      - name: Smoke-verify packaged bundle (isolated runtime check)
+      - name: Smoke-verify packaged portable bundle (isolated runtime check)
         shell: bash
         run: |
           PY_BIN=$(command -v python3 || command -v python)
@@ -258,13 +271,124 @@ jobs:
           print(f"Verified packaged bundle: {bundle.name} (with_occt={with_occt}, cli_only={cli_only})")
           PY
 
-      - name: Upload portable archive artifact
+      - name: Build formal Tauri v2 installer & updater bundle (Windows)
+        if: runner.os == 'Windows' && steps.opts.outputs.cli_only != 'true'
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          TAURI_SIGNING_PUBLIC_KEY: ${{ secrets.TAURI_SIGNING_PUBLIC_KEY }}
+          AICAD_UPDATER_PUBKEY: ${{ secrets.TAURI_SIGNING_PUBLIC_KEY }}
+        run: |
+          $stageArgs = @(
+            "scripts/stage-tauri-bundle.py",
+            "--platform", "windows",
+            "--profile", "release",
+            "--version", "${{ steps.opts.outputs.release_version }}",
+            "--github-repo", "${{ github.repository }}",
+            "--skip-before-build"
+          )
+          $features = "custom-protocol"
+          if ("${{ steps.opts.outputs.with_occt }}" -eq "true") {
+            $bridgeDir = (Resolve-Path build/occt-bridge/Release).Path
+            $env:OCCT_BRIDGE_LIB_DIR = $bridgeDir
+            $env:PATH = "$bridgeDir;$(Resolve-Path cpp/occt-prebuilt/Library/bin);$(Resolve-Path cpp/occt-prebuilt);$env:PATH"
+            $stageArgs += @("--with-occt", "--bridge-lib-dir", $bridgeDir)
+            $features = "custom-protocol,occt-ffi"
+          } else {
+            $stageArgs += "--without-occt"
+          }
+          if ($env:TAURI_SIGNING_PRIVATE_KEY -and $env:TAURI_SIGNING_PUBLIC_KEY) {
+            $stageArgs += "--create-updater-artifacts"
+          } else {
+            Write-Host "::warning::TAURI_SIGNING_PRIVATE_KEY / TAURI_SIGNING_PUBLIC_KEY not configured; building unsigned NSIS installer without auto-updater signature."
+          }
+          python @stageArgs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          Push-Location apps/desktop
+          try {
+            pnpm dlx @tauri-apps/cli@^2 build --config src-tauri/.bundle-stage/tauri.release.conf.json --features $features
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } finally {
+            Pop-Location
+          }
+
+          python scripts/stage-tauri-bundle.py `
+            --collect-from apps/desktop/src-tauri/target/release/bundle `
+            --collect-to dist/publish `
+            --target-name "${{ matrix.target_name }}" `
+            --version "${{ steps.opts.outputs.release_version }}"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build formal Tauri v2 installer & updater bundle (Linux / macOS)
+        if: runner.os != 'Windows' && steps.opts.outputs.cli_only != 'true'
+        shell: bash -el {0}
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          TAURI_SIGNING_PUBLIC_KEY: ${{ secrets.TAURI_SIGNING_PUBLIC_KEY }}
+          AICAD_UPDATER_PUBKEY: ${{ secrets.TAURI_SIGNING_PUBLIC_KEY }}
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+          NO_STRIP: "true"
+        run: |
+          PY_BIN=$(command -v python3 || command -v python)
+          STAGE_ARGS=(
+            scripts/stage-tauri-bundle.py
+            --platform "${{ matrix.stage_platform }}"
+            --profile release
+            --version "${{ steps.opts.outputs.release_version }}"
+            --github-repo "${{ github.repository }}"
+            --skip-before-build
+          )
+          FEATURES="custom-protocol"
+          if [[ "${{ steps.opts.outputs.with_occt }}" == "true" ]]; then
+            export OCCT_BRIDGE_LIB_DIR="$PWD/build/occt-bridge"
+            if [[ "$(uname -s)" == "Darwin" ]]; then
+              export DYLD_LIBRARY_PATH="$OCCT_BRIDGE_LIB_DIR:$PWD/cpp/occt-prebuilt/lib:${DYLD_LIBRARY_PATH:-}"
+              export RUSTFLAGS="-C link-arg=-Wl,-rpath,@executable_path -C link-arg=-Wl,-rpath,@executable_path/../Resources"
+            else
+              export LD_LIBRARY_PATH="$OCCT_BRIDGE_LIB_DIR:$PWD/cpp/occt-prebuilt/lib:${LD_LIBRARY_PATH:-}"
+              export RUSTFLAGS="-C link-arg=-Wl,-rpath,\$ORIGIN -C link-arg=-Wl,-rpath,\$ORIGIN/../lib -C link-arg=-Wl,-rpath,\$ORIGIN/.."
+            fi
+            STAGE_ARGS+=(--with-occt --bridge-lib-dir "$OCCT_BRIDGE_LIB_DIR")
+            FEATURES="custom-protocol,occt-ffi"
+          else
+            STAGE_ARGS+=(--without-occt)
+          fi
+          if [[ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" && -n "${TAURI_SIGNING_PUBLIC_KEY:-}" ]]; then
+            STAGE_ARGS+=(--create-updater-artifacts)
+          else
+            echo "::warning::TAURI_SIGNING_PRIVATE_KEY / TAURI_SIGNING_PUBLIC_KEY not configured; building unsigned installer without auto-updater signature."
+          fi
+
+          "$PY_BIN" "${STAGE_ARGS[@]}"
+
+          (
+            cd apps/desktop
+            pnpm dlx @tauri-apps/cli@^2 build \
+              --config src-tauri/.bundle-stage/tauri.release.conf.json \
+              --features "$FEATURES"
+          )
+
+          "$PY_BIN" scripts/stage-tauri-bundle.py \
+            --collect-from apps/desktop/src-tauri/target/release/bundle \
+            --collect-to dist/publish \
+            --target-name "${{ matrix.target_name }}" \
+            --version "${{ steps.opts.outputs.release_version }}"
+
+      - name: Stage portable archive into flat publish directory
+        shell: bash
+        run: |
+          mkdir -p dist/publish
+          cp dist/release/*.${{ matrix.archive_ext }} dist/publish/
+          ls -la dist/publish
+
+      - name: Upload portable archive & formal installers
         uses: actions/upload-artifact@v4
         with:
           name: ai-native-cad-${{ matrix.target_name }}
-          path: |
-            dist/release/*.${{ matrix.archive_ext }}
-            dist/release/*/BUILD-MANIFEST.json
+          path: dist/publish/
           retention-days: 30
 
   publish-release:
@@ -275,18 +399,52 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - uses: actions/download-artifact@v4
         with:
           path: release-artifacts
           pattern: ai-native-cad-*
           merge-multiple: true
 
-      - name: Generate release SHA256SUMS.txt
-        working-directory: release-artifacts
+      - name: Generate Tauri v2 latest.json updater manifest & SHA256SUMS.txt
+        shell: bash
         run: |
-          ls -la
-          sha256sum *.zip *.tar.gz > SHA256SUMS.txt
-          cat SHA256SUMS.txt
+          shopt -s nullglob
+          TAG_NAME="${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('snapshot-{0}', github.run_number) }}"
+          if [[ "$TAG_NAME" == v* ]]; then
+            REL_VERSION="${TAG_NAME#v}"
+          else
+            REL_VERSION=$(python3 -c 'import json; print(json.load(open("package.json"))["version"])')
+          fi
+
+          SIG_FILES=(release-artifacts/*.sig)
+          if (( ${#SIG_FILES[@]} > 0 )); then
+            python3 scripts/generate-updater-manifest.py \
+              --artifacts-dir release-artifacts \
+              --version "$REL_VERSION" \
+              --base-url "https://github.com/${{ github.repository }}/releases/download/${TAG_NAME}" \
+              --notes "AI-Native CAD Studio v${REL_VERSION} signed release (includes OCCT 7.9+ dynamic libraries, cad-cli, and services/cad-agent)." \
+              --out release-artifacts/latest.json
+            cat release-artifacts/latest.json
+          else
+            echo "::notice::No .sig updater artifacts found; skipping latest.json generation."
+          fi
+
+          (
+            cd release-artifacts
+            shopt -s nullglob
+            HASH_TARGETS=(*.zip *.tar.gz *.exe *.dmg *.AppImage *.sig latest.json)
+            ls -la
+            if (( ${#HASH_TARGETS[@]} > 0 )); then
+              sha256sum "${HASH_TARGETS[@]}" > SHA256SUMS.txt
+              cat SHA256SUMS.txt
+            fi
+          )
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -297,4 +455,9 @@ jobs:
           files: |
             release-artifacts/*.zip
             release-artifacts/*.tar.gz
+            release-artifacts/*.exe
+            release-artifacts/*.dmg
+            release-artifacts/*.AppImage
+            release-artifacts/*.sig
+            release-artifacts/latest.json
             release-artifacts/SHA256SUMS.txt

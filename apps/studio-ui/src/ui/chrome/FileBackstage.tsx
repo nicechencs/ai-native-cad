@@ -9,6 +9,7 @@ import {
   type NavigationPresetId,
 } from "../../core/viewport/navigationPreset.ts";
 import { MATERIAL_PRESETS } from "../../data/demoWorkbenchState.ts";
+import type { DesktopUpdaterController } from "../../hooks/useDesktopUpdater.ts";
 import type { MaterialPreset } from "../../types/scene.ts";
 import { CadIcon, type CadIconName } from "../icons/CadIcons.tsx";
 
@@ -29,6 +30,7 @@ export interface FileBackstageProps {
   readonly navigationPreset: NavigationPresetId;
   readonly onChangeNavigationPreset: (preset: NavigationPresetId) => void;
   readonly units: string;
+  readonly updater?: DesktopUpdaterController;
 }
 
 /**
@@ -50,6 +52,7 @@ export function FileBackstage({
   navigationPreset,
   onChangeNavigationPreset,
   units,
+  updater,
 }: FileBackstageProps) {
   const [section, setSection] = useState<BackstageSection>("document");
 
@@ -156,6 +159,9 @@ export function FileBackstage({
           >
             <CadIcon name="mouse" size={15} />
             <span>键鼠与工作台偏好</span>
+            {updater?.state.status === "available" && (
+              <span className="mini-badge is-ok" style={{ marginLeft: "auto" }}>有更新</span>
+            )}
           </button>
         </nav>
 
@@ -267,6 +273,61 @@ export function FileBackstage({
                 {renderActionCard("theme.toggle", "切换深色工业 / 浅色蓝图主题", "在深色工程暗房与浅色蓝图模式间即时切换", "sun")}
                 {renderActionCard("help.shortcuts", "打开快捷键与命令行速查", "查看全部工业键位、径向手势与 / 快捷命令语法", "keyboard")}
               </div>
+
+              {updater && (
+                <div className="backstage-updater-card" style={{ marginTop: 16 }}>
+                  <div className="backstage-preset-head">
+                    <strong>软件版本与自动更新（Tauri v2 签名校验）</strong>
+                    <span
+                      className={`mini-badge${
+                        updater.state.status === "available" || updater.state.status === "installed"
+                          ? " is-ok"
+                          : updater.state.status === "error"
+                            ? " badge-err"
+                            : ""
+                      }`}
+                    >
+                      {updater.state.supported
+                        ? updater.state.currentVersion
+                          ? `v${updater.state.currentVersion}`
+                          : "桌面端"
+                        : "浏览器模式"}
+                    </span>
+                  </div>
+                  <p className="backstage-updater-msg">{updater.state.message}</p>
+                  {updater.state.releaseNotes && updater.state.status === "available" && (
+                    <pre className="backstage-updater-notes">{updater.state.releaseNotes}</pre>
+                  )}
+                  {updater.state.status === "downloading" && (
+                    <div className="backstage-updater-progress" role="progressbar" aria-valuenow={updater.state.progressPercent ?? 0} aria-valuemin={0} aria-valuemax={100}>
+                      <div
+                        className="backstage-updater-progress-bar"
+                        style={{ width: `${updater.state.progressPercent ?? 15}%` }}
+                      />
+                    </div>
+                  )}
+                  <div className="backstage-updater-actions">
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      disabled={!updater.state.supported || updater.state.busy}
+                      onClick={() => void updater.checkForUpdates()}
+                    >
+                      {updater.state.status === "checking" ? "正在检查更新…" : "检查更新"}
+                    </button>
+                    {updater.state.status === "available" && (
+                      <button
+                        type="button"
+                        className="btn-primary"
+                        disabled={updater.state.busy}
+                        onClick={() => void updater.installUpdate()}
+                      >
+                        下载并安装 v{updater.state.availableVersion}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
             </section>
           )}
         </div>

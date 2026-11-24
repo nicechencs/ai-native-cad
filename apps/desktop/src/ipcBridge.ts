@@ -371,6 +371,43 @@ const THREEMF_PUBLICATION: ExportPublication = {
 };
 
 export const AI_AGENT_PROGRESS_EVENT = "cad-agent://progress";
+export const APP_UPDATER_PROGRESS_EVENT = "app-updater://progress";
+
+export interface AppUpdaterInfo {
+  readonly currentVersion: string;
+  readonly configured: boolean;
+  readonly endpoint: string;
+  readonly message: string;
+}
+
+export interface AppUpdateCheckResult {
+  readonly status: "available" | "up_to_date" | "unconfigured" | "error";
+  readonly currentVersion: string;
+  readonly availableVersion?: string;
+  readonly releaseDate?: string;
+  readonly releaseNotes?: string;
+  readonly downloadUrl?: string;
+  readonly configured: boolean;
+  readonly message: string;
+}
+
+export interface InstallAppUpdateRequest {
+  readonly restartAfterInstall?: boolean;
+}
+
+export interface AppUpdateInstallResult {
+  readonly status: "installed" | "up_to_date" | "unconfigured";
+  readonly currentVersion: string;
+  readonly installedVersion?: string;
+  readonly restarted: boolean;
+  readonly message: string;
+}
+
+export interface AppUpdaterProgressEvent {
+  readonly event: "started" | "progress" | "finished";
+  readonly downloadedBytes: number;
+  readonly totalBytes?: number;
+}
 
 export interface AiAgentRunRequest {
   readonly trace_id?: string;
@@ -595,6 +632,12 @@ export interface DesktopIpcClient {
   importAicadDocument(request: ImportAicadDocumentIpcRequest): Promise<OpenAicadDocumentResult>;
   saveAicadDocument(request: SaveAicadDocumentIpcRequest): Promise<SaveAicadDocumentResult>;
   undoAicadContainer(request: UndoAicadContainerIpcRequest): Promise<UndoAicadContainerResult>;
+  getAppUpdaterInfo(): Promise<AppUpdaterInfo>;
+  checkAppUpdate(): Promise<AppUpdateCheckResult>;
+  installAppUpdate(
+    request?: InstallAppUpdateRequest,
+    onProgress?: (event: AppUpdaterProgressEvent) => void,
+  ): Promise<AppUpdateInstallResult>;
 }
 
 const nativeLittleEndian = new Uint8Array(Uint32Array.of(1).buffer)[0] === 1;
@@ -889,6 +932,34 @@ export function createDesktopIpcClient(): DesktopIpcClient {
       const invoker = getTauriInvoker();
       if (!invoker) throw new Error("undo_aicad_container IPC requires the Tauri v2 desktop runtime.");
       return invoker.invoke<UndoAicadContainerResult>("undo_aicad_container", { request });
+    },
+
+    async getAppUpdaterInfo(): Promise<AppUpdaterInfo> {
+      const invoker = requireTauri("get_app_updater_info");
+      return invoker.invoke<AppUpdaterInfo>("get_app_updater_info");
+    },
+
+    async checkAppUpdate(): Promise<AppUpdateCheckResult> {
+      const invoker = requireTauri("check_app_update");
+      return invoker.invoke<AppUpdateCheckResult>("check_app_update");
+    },
+
+    async installAppUpdate(
+      request?: InstallAppUpdateRequest,
+      onProgress?: (event: AppUpdaterProgressEvent) => void,
+    ): Promise<AppUpdateInstallResult> {
+      const invoker = requireTauri("install_app_update");
+      const stop = onProgress
+        ? await listenTauriEvent<AppUpdaterProgressEvent>(invoker, APP_UPDATER_PROGRESS_EVENT, onProgress)
+        : () => {};
+      try {
+        return await invoker.invoke<AppUpdateInstallResult>(
+          "install_app_update",
+          request ? { request } : {},
+        );
+      } finally {
+        stop();
+      }
     },
   };
 }

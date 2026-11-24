@@ -157,6 +157,7 @@ mod observe;
 pub mod private_fs;
 pub mod project_commands;
 pub mod session_commands;
+pub mod updater;
 
 const MAX_ASSET_BYTES: usize = 32 * 1024 * 1024;
 
@@ -1331,7 +1332,11 @@ pub mod commands {
 pub fn run() {
     observe::init();
     tauri::Builder::default()
+        .plugin(updater::build_updater_plugin())
         .setup(|app| {
+            if let Ok(resource_dir) = app.path().resource_dir() {
+                ai_bridge::register_resource_dir(resource_dir);
+            }
             // A launcher can explicitly open a project; otherwise use private app storage.
             let root = match std::env::var_os("CAD_STUDIO_WORKSPACE_DIR").filter(|p| !p.is_empty())
             {
@@ -1393,6 +1398,9 @@ pub fn run() {
             live_attach::live_attach_update_selection,
             live_attach::live_attach_get_status,
             live_attach::live_attach_apply_ui_commands,
+            updater::get_app_updater_info,
+            updater::check_app_update,
+            updater::install_app_update,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

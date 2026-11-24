@@ -44,6 +44,7 @@ import { ViewportChangePreviewBar } from "../features/ai-assistant/ViewportChang
 import { InlinePointPromptPopover } from "../features/ai-assistant/InlinePointPromptPopover.tsx";
 import { AiAssistantPanel } from "../features/ai-assistant/AiAssistantPanel.tsx";
 import { FeatureDashboard } from "../features/modeling/FeatureDashboard.tsx";
+import { useDesktopUpdater } from "../hooks/useDesktopUpdater.ts";
 import { useEngineeringSession } from "../hooks/useEngineeringSession.ts";
 import { useWorkbenchCommands } from "../hooks/useWorkbenchCommands.ts";
 import { useWorkbenchDocument } from "../hooks/useWorkbenchDocument.ts";
@@ -59,7 +60,7 @@ import { ConfirmDialog, ContextMenu, ShortcutsModal } from "../ui/chrome/StudioO
 import { ActivityBar, DockPanel, type DockTabItem } from "../ui/chrome/DockPanel.tsx";
 import { ViewportHudOverlay } from "../features/viewport/ViewportHudOverlay.tsx";
 import { CenterViewport } from "./CenterViewport.tsx";
-import { LeftPanel } from "./LeftPanel.tsx";
+import { LeftPanel, useFeatureTreeMount } from "./LeftPanel.tsx";
 import { RightPanel } from "./RightPanel.tsx";
 import { TraceIdChip } from "./TraceIdChip.tsx";
 import { WorkbenchTabPanel } from "./WorkbenchTabs.tsx";
@@ -80,6 +81,7 @@ export function WorkbenchLayout({
     preview: changePreview,
     applySemanticCommands,
   } = useEngineeringSession();
+  const featureTree = useFeatureTreeMount();
   const [initialUiPrefs] = useState(loadWorkbenchUiPrefs);
   const [layoutPrefs, setLayoutPrefs] = useState(loadLayoutPrefs);
   const [leftTab, setLeftTab] = useState<PersistedLeftTab>(initialUiPrefs.leftTab);
@@ -123,6 +125,7 @@ export function WorkbenchLayout({
   const notify = useCallback((input: PushNotificationInput) => {
     setNotifications((prev) => pushNotification(prev, input).state);
   }, []);
+  const desktopUpdater = useDesktopUpdater(backend, notify);
 
   const viewport = useWorkbenchViewport(initialUiPrefs, notify);
   const {
@@ -888,12 +891,14 @@ export function WorkbenchLayout({
             selectedCount={selectedTargets.length}
             graphIr={graphIr}
             selectedNodeId={selectedNodeId}
-            onRenameNode={(nodeId, name) => dispatchSemanticCommand({ op: "rename_node", nodeId, name })}
-            onSetNodeSuppressed={(nodeId, suppressed) =>
-              dispatchSemanticCommand({ op: "set_node_suppressed", nodeId, suppressed })
-            }
-            onUpsertParameter={(value) => dispatchSemanticCommand({ op: "upsert_parameter", value })}
-            onEmitGraphPatch={(patch) => applySemanticCommands([{ op: "apply_graph_patch", patch }], patch.description)}
+            onRenameNode={featureTree?.onRenameNode ?? ((nodeId, name) =>
+              dispatchSemanticCommand({ op: "rename_node", nodeId, name }))}
+            onSetNodeSuppressed={featureTree?.onSetNodeSuppressed ?? ((nodeId, suppressed) =>
+              dispatchSemanticCommand({ op: "set_node_suppressed", nodeId, suppressed }))}
+            onUpsertParameter={featureTree?.onUpsertParameter ?? ((value) =>
+              dispatchSemanticCommand({ op: "upsert_parameter", value }))}
+            onEmitGraphPatch={featureTree?.onEmitGraphPatch ?? ((patch) =>
+              applySemanticCommands([{ op: "apply_graph_patch", patch }], patch.description))}
             onFocusSource={() => executeCommand("source.focusSelection")}
             onTagSelected={() => executeCommand("annotate.tagTopology")}
             onJumpToViolation={(target) => {
@@ -973,6 +978,7 @@ export function WorkbenchLayout({
         navigationPreset={navigationPreset}
         onChangeNavigationPreset={setNavigationPreset}
         units={evaluated.sceneMesh.units || "mm"}
+        updater={desktopUpdater}
       />
 
       <NotificationDrawer

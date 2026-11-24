@@ -144,11 +144,23 @@ pnpm build:desktop
 
 On Linux and macOS, use `./scripts/package-release.sh` (`--dry-run`, `--cli-only`, `--without-occt`).
 
-### Automated GitHub Actions Release Packaging (Windows / Linux / macOS)
+### Automated GitHub Actions Releases, Formal Installers & Signed Auto-Updates (Windows / Linux / macOS)
 
-The repository includes `.github/workflows/release.yml` for automated cross-platform portable bundles (Tauri desktop app, `cad-cli`, optional authoritative OCCT 7.9+ shared libraries, `services/cad-agent`, and `SHA256SUMS.txt`):
-- **Tag-driven Releases**: Pushing a `v*` tag (for example `git tag v0.1.0 && git push origin v0.1.0`) builds Windows x64 (`.zip`), Linux x64 (`.tar.gz`), and macOS arm64 (`.tar.gz`) bundles, smoke-verifies each packaged `cad-cli` in an isolated library path, and publishes a GitHub Release with combined `SHA256SUMS.txt`.
-- **Manual Workflow Dispatch**: Run **Release Portable Bundles** from the GitHub Actions UI with configurable `with_occt`, `cli_only`, and `publish_release` (draft release) flags; artifacts are retained for 30 days.
+The repository includes `.github/workflows/release.yml` (**Release Installers & Portable Bundles**), which produces both **formal auto-updating installers** and **portable archives** (bundling the Tauri desktop app, `cad-cli`, authoritative OCCT 7.9+ shared libraries, `services/cad-agent`, and `SHA256SUMS.txt`):
+- **Formal Installers (Tauri v2 Signed Auto-Updates)**:
+  - Windows x64: NSIS installer (`*-setup.exe` + `.sig`)
+  - macOS arm64: `.dmg` disk image + `.app.tar.gz` updater archive (+ `.sig`)
+  - Linux x64: `.AppImage` (+ `.sig`)
+  - Inside the desktop workbench, open **File › Preferences › Software Version & Auto-Update** to check and install signed updates from GitHub Releases (`latest.json`). Minisign cryptographic verification is enforced before installation, and upgrades atomically update the workbench, `cad-cli`, OCCT shared libraries, and `services/cad-agent`.
+- **Portable Archives**: Windows x64 (`.zip`), Linux x64 (`.tar.gz`), and macOS arm64 (`.tar.gz`) for unpack-and-run usage.
+- **Tag-driven Releases**: Pushing a `v*` tag (for example `git tag v0.2.0 && git push origin v0.2.0`) builds all three platforms, smoke-verifies each packaged `cad-cli` in an isolated library path, and publishes a GitHub Release with `latest.json` and `SHA256SUMS.txt`.
+- **Maintainer One-Time Signing Setup**:
+  1. Generate a Tauri minisign keypair: `pnpm dlx @tauri-apps/cli@^2 signer generate -w ~/.tauri/ai-native-cad.key`
+  2. Add these Repository Secrets under **Settings › Secrets and variables › Actions**:
+     - `TAURI_SIGNING_PRIVATE_KEY`: full contents of `~/.tauri/ai-native-cad.key`
+     - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`: key password (optional if blank)
+     - `TAURI_SIGNING_PUBLIC_KEY`: full contents of `~/.tauri/ai-native-cad.key.pub`
+  3. Push the next `v*` tag to emit signed installers, `.sig` files, and `latest.json` (when secrets are absent, unsigned installers and portable bundles still build cleanly).
 
 ---
 

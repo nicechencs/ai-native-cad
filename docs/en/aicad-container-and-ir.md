@@ -76,3 +76,7 @@ cad-cli project vacuum tmp_out/plate.aicad
 ```
 
 See the [`cad-cli` Reference](cli-reference.md) for the full subcommand catalog.
+
+## 5. Sync a feature graph patch in Web Studio
+
+In Model Tree → Graph IR, expand the workspace `.aicad` sync section and initialize a project. Edit a feature, then select Sync Patch to write the latest feature graph edit to the workspace container. If the development server disconnects, the edit stays local and you can retry when the server returns. Run `cad-cli project emit-kcl <project-path>` to reopen the container and check the synced result.

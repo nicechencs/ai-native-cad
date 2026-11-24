@@ -144,11 +144,23 @@ pnpm build:desktop
 
 Linux / macOS 对应脚本为 `./scripts/package-release.sh`（支持 `--dry-run`、`--cli-only`、`--without-occt`）。
 
-### GitHub Actions 自动打包与发布（Windows / Linux / macOS）
+### GitHub Actions 自动打包、正式安装包与签名自动更新（Windows / Linux / macOS）
 
-公开仓库内置 `.github/workflows/release.yml`，支持两种自动出包方式（默认包含权威 OCCT 7.9+ 动态库、Tauri 桌面端、`cad-cli`、`services/cad-agent` 与 `SHA256SUMS.txt`）：
-- **打版本标签自动发布**：推送 `v*` 标签（如 `git tag v0.1.0 && git push origin v0.1.0`）自动并行构建 Windows x64（`.zip`）、Linux x64（`.tar.gz`）与 macOS arm64（`.tar.gz`）便携包，经隔离运行时自检通过后自动创建 GitHub Release。
-- **Actions 手动触发**：在 GitHub Actions 页面运行 **Release Portable Bundles**，可按需勾选 `with_occt`、`cli_only` 与 `publish_release`（草稿 Release），产物默认作为 Workflow Artifacts 保留 30 天。
+公开仓库内置 `.github/workflows/release.yml`（**Release Installers & Portable Bundles**），同时产出**正式自动更新安装包**与**便携压缩包**（默认包含权威 OCCT 7.9+ 动态库、Tauri 桌面端、`cad-cli`、`services/cad-agent` 与 `SHA256SUMS.txt`）：
+- **正式安装包（支持 Tauri v2 签名自动更新）**：
+  - Windows x64：NSIS 安装包（`*-setup.exe` + `.sig`）
+  - macOS arm64：`.dmg` 安装镜像 + `.app.tar.gz` 更新归档（+ `.sig`）
+  - Linux x64：`.AppImage`（+ `.sig`）
+  - 桌面端内置自动更新器（位于 **文件 › 键鼠与工作台偏好 › 软件版本与自动更新**），启动时静默检查 GitHub Releases 的 `latest.json`，下载前进行 minisign 公钥验签，更新时连同桌面端、`cad-cli`、OCCT 动态库与 `services/cad-agent` 整体升级。
+- **便携压缩包**：Windows x64（`.zip`）、Linux x64（`.tar.gz`）与 macOS arm64（`.tar.gz`），解压即用（不启用原位自动覆盖更新）。
+- **打版本标签自动发布**：推送 `v*` 标签（如 `git tag v0.2.0 && git push origin v0.2.0`）自动并行构建三端产物，经隔离运行时自检后创建 GitHub Release 并自动生成 `latest.json` 与 `SHA256SUMS.txt`。
+- **维护者启用签名自动更新（一次性配置）**：
+  1. 本地生成 minisign 密钥对：`pnpm dlx @tauri-apps/cli@^2 signer generate -w ~/.tauri/ai-native-cad.key`
+  2. 在公开仓库 **Settings › Secrets and variables › Actions** 新增以下 Repository Secrets：
+     - `TAURI_SIGNING_PRIVATE_KEY`：`~/.tauri/ai-native-cad.key` 的完整文件内容
+     - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`：生成密钥时设置的口令（若为空密码可不填）
+     - `TAURI_SIGNING_PUBLIC_KEY`：`~/.tauri/ai-native-cad.key.pub` 的完整文件内容
+  3. 推送下一个 `v*` 标签即可自动产出已签名安装包、`.sig` 文件与 `latest.json`（未配置 Secrets 时仍可正常构建未签名安装包与便携包）。
 
 ---
 

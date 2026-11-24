@@ -7,7 +7,12 @@ import {
   type AiAgentProgressEvent,
   type AiAgentRunRequest,
   type AiAgentRunResult,
+  type AppUpdateCheckResult,
+  type AppUpdateInstallResult,
+  type AppUpdaterInfo,
+  type AppUpdaterProgressEvent,
   type DesktopIpcClient,
+  type InstallAppUpdateRequest,
 } from "../../../desktop/src/ipcBridge.ts";
 import {
   compactSceneToSceneMesh,
@@ -36,6 +41,7 @@ export function classifyNativeAgentError(error: unknown): { readonly error_code:
 
 import { evaluateDemoKclModel } from "../data/demoWorkbenchState.ts";
 import { browserStepBlockedMessage, previewBrowserStep } from "../preview/stepPreview.ts";
+import { DIAGNOSTIC_CODES } from "../types/schemaConstants.ts";
 import type {
   AiConfigStatus,
   AiProfileDraftInput,
@@ -60,7 +66,15 @@ import {
   type TransportError,
 } from "../utils/trace.ts";
 
-export type { WorkspaceAsset, TransportError };
+export type {
+  AppUpdateCheckResult,
+  AppUpdateInstallResult,
+  AppUpdaterInfo,
+  AppUpdaterProgressEvent,
+  InstallAppUpdateRequest,
+  WorkspaceAsset,
+  TransportError,
+};
 
 export interface WorkbenchDocument {
   readonly fileName: string;
@@ -129,6 +143,12 @@ export interface WorkbenchBackend {
   importAicadDocument?(fileName: string, contentsBase64: string): Promise<{ projectPath: string; projectName: string; source: string; history?: { canRollback: boolean; oplogLen: number; headSeq: number | null; previousSeq: number | null } }>;
   saveAicadDocument?(request: { projectPath: string; projectName: string; source: string }): Promise<{ projectPath: string; projectName: string; history?: { canRollback: boolean; oplogLen: number; headSeq: number | null; previousSeq: number | null } }>;
   undoAicadContainer?(request: { projectPath: string }): Promise<{ projectPath: string; projectName: string; source: string; history: { canRollback: boolean; oplogLen: number; headSeq: number | null; previousSeq: number | null } }>;
+  getAppUpdaterInfo?(): Promise<AppUpdaterInfo>;
+  checkAppUpdate?(): Promise<AppUpdateCheckResult>;
+  installAppUpdate?(
+    request?: InstallAppUpdateRequest,
+    onProgress?: (event: AppUpdaterProgressEvent) => void,
+  ): Promise<AppUpdateInstallResult>;
 }
 
 export class WorkbenchUnavailableError extends Error {
@@ -1180,6 +1200,16 @@ export function createTauriWorkbenchBackend(
         };
       } catch (error) {
         signal?.throwIfAborted();
+        const message = error instanceof Error ? error.message : error;
+        const conflictCode = DIAGNOSTIC_CODES.E409_PREVIEW_DIVERGED;
+        if (typeof message === "string" && message.includes(`${conflictCode}:`)) {
+          throw new WorkbenchTransportError({
+            code: conflictCode,
+            message: "主分支已在预览创建后更新。请基于当前版本重新生成预览。",
+            traceId,
+            operation: "preview-commit",
+          });
+        }
         rethrowIpc(error, traceId, "preview-commit");
       }
     },
@@ -1279,6 +1309,15 @@ export function createTauriWorkbenchBackend(
       } catch (error) {
         rethrowIpc(error, traceId, "undo-aicad-container");
       }
+    },
+    async getAppUpdaterInfo() {
+      return ipc.getAppUpdaterInfo();
+    },
+    async checkAppUpdate() {
+      return ipc.checkAppUpdate();
+    },
+    async installAppUpdate(request, onProgress) {
+      return ipc.installAppUpdate(request, onProgress);
     },
   };
 }

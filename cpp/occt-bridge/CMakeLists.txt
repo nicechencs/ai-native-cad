@@ -36,6 +36,22 @@ set_target_properties(occt_bridge PROPERTIES UNITY_BUILD ON UNITY_BUILD_MODE GRO
 set_source_files_properties(src/occt_bridge.cpp src/occt_construct.cpp src/occt_freeform.cpp
     src/occt_xcaf.cpp PROPERTIES UNITY_GROUP bridge_registry)
 
+# Ensure occt_bridge uses portable relative library search paths in installers and portable bundles.
+if(APPLE)
+    set_target_properties(occt_bridge PROPERTIES
+        MACOSX_RPATH ON
+        INSTALL_NAME_DIR "@rpath"
+        BUILD_WITH_INSTALL_NAME_DIR ON
+        BUILD_RPATH "@loader_path;${OCCT_PREBUILT_DIR}/lib"
+        INSTALL_RPATH "@loader_path"
+    )
+elseif(UNIX)
+    set_target_properties(occt_bridge PROPERTIES
+        BUILD_RPATH "\$ORIGIN;${OCCT_PREBUILT_DIR}/lib"
+        INSTALL_RPATH "\$ORIGIN"
+    )
+endif()
+
 target_compile_definitions(occt_bridge PRIVATE OCCT_BRIDGE_EXPORTS)
 if(WIN32)
     target_compile_definitions(occt_bridge PRIVATE NOMINMAX)

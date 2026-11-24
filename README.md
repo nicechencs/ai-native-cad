@@ -70,7 +70,7 @@ pnpm dev:server
 # 终端 2（macOS/Linux: CAD_STUDIO_API_PROXY=http://127.0.0.1:4173 pnpm dev）
 ```
 
-Tauri 桌面端直接通过原生 IPC 调用本地 Rust 运行时，无需启动 Node API 服务（详见 [快速开始与构建指南](docs/zh/getting-started.md)）。推送 `v*` 标签或在 GitHub Actions 手动运行 **Release Portable Bundles**（`.github/workflows/release.yml`）可自动打包 Windows / Linux / macOS 便携程序包（含桌面端、CLI、OCCT 动态库与 `SHA256SUMS.txt`）。
+Tauri 桌面端直接通过原生 IPC 调用本地 Rust 运行时，无需启动 Node API 服务（详见 [快速开始与构建指南](docs/zh/getting-started.md)）。推送 `v*` 标签或在 GitHub Actions 手动运行 **Release Installers & Portable Bundles**（`.github/workflows/release.yml`）可自动构建 Windows NSIS / macOS DMG / Linux AppImage 正式安装包（支持 Tauri v2 minisign 签名自动更新与 `latest.json`）及三端便携压缩包（均内置桌面端、CLI、OCCT 动态库与 `SHA256SUMS.txt`）。
 
 ### 3. 运行 Python SDK 示例与接入外部 Agent（MCP）
 

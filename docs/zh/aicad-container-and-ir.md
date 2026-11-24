@@ -76,3 +76,7 @@ cad-cli project vacuum tmp_out/plate.aicad
 ```
 
 更多子命令详见 [`cad-cli` 命令行参考](cli-reference.md)。
+
+## 5. 在 Web Studio 同步特征图补丁
+
+在「模型树 → 特征图 Graph IR」中展开「工作区 .aicad 工程同步」并初始化工程。编辑特征后，点击「同步补丁」将最近一次特征图编辑写入工作区容器。如果开发服务暂时断开，编辑保留在本地，服务恢复后可重试。可以用 `cad-cli project emit-kcl <工程路径>` 重新读取容器并检查同步结果。
