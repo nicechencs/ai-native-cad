@@ -560,7 +560,15 @@ pub(crate) fn resolve_native_edge_indices(
         }
         let p = [preview.polyline[0], preview.polyline[1], preview.polyline[2]];
         let n = preview.polyline.len();
-        let q = [preview.polyline[n - 3], preview.polyline[n - 2], preview.polyline[n - 1]];
+        let mut q = [preview.polyline[n - 3], preview.polyline[n - 2], preview.polyline[n - 1]];
+        // Closed circular rims repeat the seam vertex at both ends. Use a mid
+        // sample so incident-face mapping still sees two distinct points.
+        if dist_sq(p, q) <= 1e-8 && n >= 9 {
+            let point_count = n / 3;
+            let mid = (point_count / 2) * 3;
+            let mid = if mid >= 3 && mid + 2 < n { mid } else { 3 };
+            q = [preview.polyline[mid], preview.polyline[mid + 1], preview.polyline[mid + 2]];
+        }
         let incident_faces = incident_occt_faces(shape, p, q);
         if incident_faces.len() < 2 {
             return Err(KernelError::OperationFailed(format!(

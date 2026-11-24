@@ -48,7 +48,7 @@ import { useEngineeringSession } from "../hooks/useEngineeringSession.ts";
 import { useWorkbenchCommands } from "../hooks/useWorkbenchCommands.ts";
 import { useWorkbenchDocument } from "../hooks/useWorkbenchDocument.ts";
 import { useWorkbenchViewport } from "../hooks/useWorkbenchViewport.ts";
-import { sourceUndoAction, WORKBENCH_FILE } from "../hooks/workbenchSource.ts";
+import { sourceUndoAction } from "../hooks/workbenchSource.ts";
 import { RibbonBar } from "../ui/chrome/RibbonBar.tsx";
 import { FileBackstage } from "../ui/chrome/FileBackstage.tsx";
 import { TopBorderBar } from "../ui/chrome/TopBorderBar.tsx";
@@ -160,7 +160,9 @@ export function WorkbenchLayout({
     sourceRevisionRef, sourceFileInput, applySourceUpdate, canUndo,
     model, evaluated, compiling, compilePending, showingLastAccepted, transportError, isAssembly, canExport, exporting, currentExport,
     errorCount, statusErrorCount, holeOffsetPending, handleUndo, handleCommitPreview, handleDiscardPreview, previewActionPending,
-    handleOffsetHole, handleLoadKclFile, aiConfigStatus, aiProfiles, activeAiProfileId, aiProfileStorage,
+    handleOffsetHole, handleLoadKclFile, documentFileName, setDocumentFileName, aicadFileInput,
+    pendingPreviewExport, confirmPreviewExport, cancelPreviewExport,
+    aiConfigStatus, aiProfiles, activeAiProfileId, aiProfileStorage,
     handleSaveAiProfiles, handleSelectAiProfile, handleResetAiProfiles, handleTestAiConnection,
     aiGenerating, aiFeedback, aiUndoRevision, aiProgressSteps, aiThread, handleClearAiThread,
     handleCancelAi, handleAiGenerate,
@@ -521,6 +523,17 @@ export function WorkbenchLayout({
           if (file) void handleLoadKclFile(file);
         }}
       />
+      <input
+        ref={aicadFileInput}
+        type="file"
+        accept=".aicad,application/octet-stream"
+        hidden
+        onChange={(event) => {
+          const file = event.currentTarget.files?.[0];
+          event.currentTarget.value = "";
+          if (file) void documentState.handleLoadAicadFile?.(file);
+        }}
+      />
 
       {/* Zone 1 & 2: Title Bar + QAT + Task-Oriented NX/Creo Ribbon */}
       <RibbonBar
@@ -528,7 +541,7 @@ export function WorkbenchLayout({
         context={commandContext}
         onExecute={(id) => executeCommand(id)}
         onOpenFileBackstage={() => setFileBackstageOpen(true)}
-        documentName={WORKBENCH_FILE}
+        documentName={documentFileName}
         partName={evaluated.sceneMesh.part_name}
         activeBranch={activeBranch}
         compiling={compiling}
@@ -936,6 +949,10 @@ export function WorkbenchLayout({
           })
         }
         units={evaluated.sceneMesh.units || "mm"}
+        onOpenDiagnostics={() => openLeftDock("checks")}
+        kernelAuthoritative={evaluated.diagnostics.metrics.kernel_authoritative}
+        kernelBackend={evaluated.diagnostics.metrics.kernel_backend}
+        kernelFallbackReason={evaluated.diagnostics.metrics.kernel_fallback_reason}
         navigationPreset={navigationPreset}
         onChangeNavigationPreset={setNavigationPreset}
         onRegenerate={handleRegenerateModel}
@@ -944,7 +961,7 @@ export function WorkbenchLayout({
       <FileBackstage
         open={fileBackstageOpen}
         onClose={() => setFileBackstageOpen(false)}
-        documentName={WORKBENCH_FILE}
+        documentName={documentFileName}
         partName={evaluated.sceneMesh.part_name}
         activeBranch={activeBranch}
         activeProjectPath={activeProjectPath}
@@ -997,6 +1014,7 @@ export function WorkbenchLayout({
         confirmLabel="恢复演示模型"
         onConfirm={() => {
           setResetConfirmOpen(false);
+          setDocumentFileName("model.kcl");
           const undoRevision = applySourceUpdate(INITIAL_DEMO_KCL, { summary: "重置演示模型" });
           setSelectedMaterial(MATERIAL_PRESETS[0]);
           setSectionCut({ enabled: false, axis: "Z", ratio: 0.55 });
@@ -1010,6 +1028,16 @@ export function WorkbenchLayout({
           });
         }}
         onCancel={() => setResetConfirmOpen(false)}
+      />
+
+      <ConfirmDialog
+        open={pendingPreviewExport === "step"}
+        title="导出非权威预览 STEP"
+        description="当前内核是解析预览，不是权威 OCCT B-Rep。导出的 STEP 仅供预览，不能当作精确可交付几何。确定仍要导出吗？"
+        confirmLabel="仍导出预览 STEP"
+        cancelLabel="取消"
+        onConfirm={() => confirmPreviewExport()}
+        onCancel={() => cancelPreviewExport()}
       />
 
       <ShortcutsModal

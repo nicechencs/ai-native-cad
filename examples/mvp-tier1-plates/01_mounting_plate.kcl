@@ -1,0 +1,67 @@
+// MVP Tier 1 Golden Part 01: 矩形精密安装底板（中心 H7 定位孔 + 四角 M6 沉头孔）
+
+@unit(length = "mm", angle = "deg", force = "N")
+@material("Al-6061-T6")
+@manufacturing(method = "CNC_3AXIS_MILLING", min_tool_radius = 2.0mm)
+
+part MountingPlate(
+    plate_length: Length = 120.0mm,
+    plate_width: Length = 80.0mm,
+    plate_thickness: Length = 12.0mm,
+    center_bore_d: Length = 28.0mm @pmi::tolerance("H7", roughness = "Ra1.6"),
+    corner_fillet_r: Length = 6.0mm
+) -> Solid {
+    let hole_span_x = plate_length - 30.0mm
+    let hole_span_y = plate_width - 30.0mm
+
+    let base_plate = box(
+        size = [plate_length, plate_width, plate_thickness],
+        origin = [-plate_length / 2.0, -plate_width / 2.0, 0.0mm]
+    )
+    |> fillet(r = corner_fillet_r)
+
+    let center_bore_tool = cylinder(
+        d = center_bore_d,
+        h = plate_thickness + 2.0mm,
+        origin = [0.0mm, 0.0mm, -1.0mm],
+        exact_brep = true
+    )
+    |> tag::cylindrical_faces("center_pilot_bore")
+
+    let front_bolt_row = hole::counterbore(
+        d_through = 6.6mm,
+        d_cbore = 11.0mm,
+        depth_cbore = 6.4mm,
+        depth_through = plate_thickness + 2.0mm,
+        origin = [-hole_span_x / 2.0, -hole_span_y / 2.0, plate_thickness]
+    )
+    |> array::linear(axis = X_AXIS, count = 2, spacing = hole_span_x)
+
+    let rear_bolt_row = hole::counterbore(
+        d_through = 6.6mm,
+        d_cbore = 11.0mm,
+        depth_cbore = 6.4mm,
+        depth_through = plate_thickness + 2.0mm,
+        origin = [-hole_span_x / 2.0, hole_span_y / 2.0, plate_thickness]
+    )
+    |> array::linear(axis = X_AXIS, count = 2, spacing = hole_span_x)
+
+    let mounting_holes = boolean::union(items = [front_bolt_row, rear_bolt_row])
+        |> tag::faces("mounting_counterbores")
+
+    let final_part = base_plate
+        |> boolean::subtract(
+            tools = [center_bore_tool, mounting_holes],
+            preserve_exact_interfaces = true
+        )
+
+    let bottom_datum = final_part.faces().planar().filter(normal = -Z).min_by(coord = Z)
+        |> pmi::datum("A", flatness = 0.02mm)
+    let pilot_surface = final_part.faces().tagged("center_pilot_bore")
+        |> pmi::perpendicularity(tol = 0.015mm, datum = "A")
+
+    assert::bbox(target = final_part, max_size = [130.0mm, 90.0mm, 20.0mm])
+    assert::dfm_accessible(target = final_part, axes = [+Z, -Z], min_wall_thickness = 3.0mm)
+
+    return final_part
+}

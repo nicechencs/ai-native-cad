@@ -57,6 +57,10 @@ pub struct EngineStatus {
     pub occt_available: bool,
     pub wgpu_backend: &'static str,
     pub offline_ready: bool,
+    pub kernel_backend: String,
+    pub kernel_authoritative: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -78,6 +82,8 @@ pub struct ExportRequest {
     pub out_path: String,
     pub include_pmi: Option<bool>,
     pub views: Option<Vec<String>>,
+    #[serde(default)]
+    pub allow_non_authoritative_preview: Option<bool>,
 }
 
 /// Protocol string shared with the web compile abort path. Not an R-code.
@@ -104,6 +110,45 @@ pub struct ExportResult {
     pub bytes_written: u64,
     pub pmi_entity_count: usize,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authoritative: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kernel_backend: Option<String>,
+}
+
+
+fn is_authoritative_kernel_backend(name: &str) -> bool {
+    // Evaluator reports live OCCT solids as `occt-ffi`; the kernel's backend_name is `occt`.
+    matches!(name, "occt" | "occt-ffi")
+}
+
+fn engine_status_from_runtime() -> EngineStatus {
+    #[cfg(feature = "occt-ffi")]
+    let occt_available = cad_kernel_occt::OcctKernel::is_available();
+    #[cfg(not(feature = "occt-ffi"))]
+    let occt_available = false;
+    let kernel_backend = if occt_available {
+        "occt".to_string()
+    } else {
+        "rust-brep-mvp".to_string()
+    };
+    let fallback_reason = if occt_available {
+        None
+    } else if cfg!(feature = "occt-ffi") {
+        Some("OCCT 桥接库未就绪或 ABI 握手失败，已回退到解析预览内核。".to_string())
+    } else {
+        Some("此构建未启用 occt-ffi，当前为解析预览内核。".to_string())
+    };
+    EngineStatus {
+        runtime: "tauri-v2",
+        engine_version: env!("CARGO_PKG_VERSION"),
+        occt_available,
+        wgpu_backend: "wgpu-native",
+        offline_ready: true,
+        kernel_backend,
+        kernel_authoritative: occt_available,
+        fallback_reason,
+    }
 }
 
 pub mod ai_bridge;
@@ -184,7 +229,8 @@ pub mod commands {
     use super::{
         CompileKclRequest, DesktopWorkspace, EXPORT_CLIENT_ABORTED, EngineStatus,
         ExportControlRequest, ExportRequest, ExportResult, MAX_ASSET_BYTES, describe_asset,
-        normalized_asset_name, workspace_asset_directory,
+        engine_status_from_runtime, is_authoritative_kernel_backend, normalized_asset_name,
+        workspace_asset_directory,
     };
     use cad_evaluator::{EvaluationOutput, FsAssetResolver, evaluate_graph_source_output};
     use cad_hir::{Diagnostic, Severity};
@@ -383,15 +429,26 @@ pub mod commands {
             "edge_count": chk.edge_count,
             "compile_time_ms": eval_out.compile_time_ms,
             "kernel_backend": eval_out.kernel_backend,
+            "kernel_authoritative": is_authoritative_kernel_backend(&eval_out.kernel_backend),
             "eval_path": unified.eval_path.as_str(),
         });
-        if !unified.fallback_reasons.is_empty()
-            && let Some(obj) = metrics.as_object_mut()
-        {
-            obj.insert(
-                "fallback_reasons".into(),
-                serde_json::json!(unified.fallback_reasons),
-            );
+        if let Some(obj) = metrics.as_object_mut() {
+            if !is_authoritative_kernel_backend(&eval_out.kernel_backend) {
+                let reason = if !unified.fallback_reasons.is_empty() {
+                    unified.fallback_reasons.join("; ")
+                } else if !cfg!(feature = "occt-ffi") {
+                    "此构建未启用 occt-ffi，当前为解析预览内核。".to_string()
+                } else {
+                    "当前内核不是权威 OCCT B-Rep。".to_string()
+                };
+                obj.insert("kernel_fallback_reason".into(), serde_json::json!(reason));
+            }
+            if !unified.fallback_reasons.is_empty() {
+                obj.insert(
+                    "fallback_reasons".into(),
+                    serde_json::json!(unified.fallback_reasons),
+                );
+            }
         }
         serde_json::json!({
             "status": status,
@@ -783,14 +840,9 @@ pub mod commands {
 
     #[tauri::command]
     pub fn get_engine_status() -> EngineStatus {
-        EngineStatus {
-            runtime: "tauri-v2",
-            engine_version: env!("CARGO_PKG_VERSION"),
-            occt_available: cfg!(feature = "occt-ffi"),
-            wgpu_backend: "wgpu-native",
-            offline_ready: true,
-        }
+        engine_status_from_runtime()
     }
+
 
     #[tauri::command]
     pub fn compile_kcl(
@@ -1027,6 +1079,13 @@ pub mod commands {
                 resolve_export_path(workspace_root, &request.out_path)?;
             }
             let mut eval_out = evaluate_require_ok(&request, workspace)?;
+            let authoritative = is_authoritative_kernel_backend(&eval_out.kernel_backend);
+            if !authoritative && !request.allow_non_authoritative_preview.unwrap_or(false) {
+                return Err(
+                    "当前为解析预览内核，不能将结果作为权威 STEP AP242 导出。若仅需非权威预览 STEP，请在界面确认后再导出。"
+                        .to_string(),
+                );
+            }
             if !request.include_pmi.unwrap_or(true) {
                 eval_out.solid.pmi.clear();
             }
@@ -1047,10 +1106,19 @@ pub mod commands {
                 bytes_written,
                 pmi_entity_count,
                 trace_id: Some(trace_id.to_owned()),
-                message: format!(
-                    "Exported STEP AP242 for {} ({} bytes, {} PMI entities)",
-                    eval_out.part_name, bytes_written, pmi_entity_count
-                ),
+                message: if authoritative {
+                    format!(
+                        "Exported STEP AP242 for {} ({} bytes, {} PMI entities)",
+                        eval_out.part_name, bytes_written, pmi_entity_count
+                    )
+                } else {
+                    format!(
+                        "已导出非权威预览 STEP（{}，{} 字节）。该文件不是精确 OCCT B-Rep。",
+                        eval_out.part_name, bytes_written
+                    )
+                },
+                authoritative: Some(authoritative),
+                kernel_backend: Some(eval_out.kernel_backend.clone()),
             })
         })
     }
@@ -1111,6 +1179,8 @@ pub mod commands {
                     view_count, eval_out.part_name, bytes_written
                 ),
                 trace_id: Some(trace_id.to_owned()),
+                authoritative: None,
+                kernel_backend: None,
             })
         })
     }
@@ -1174,6 +1244,8 @@ pub mod commands {
                     eval_out.part_name, bytes_written
                 ),
                 trace_id: Some(trace_id.to_owned()),
+                authoritative: None,
+                kernel_backend: None,
             })
         })
     }
@@ -1248,6 +1320,8 @@ pub mod commands {
                     "Exported 3MF for {} ({} bytes)",
                     eval_out.part_name, bytes_written
                 ),
+                authoritative: None,
+                kernel_backend: None,
             })
         })
     }
@@ -1306,6 +1380,10 @@ pub fn run() {
             project_commands::slice_aicad_context,
             project_commands::vacuum_aicad_project,
             project_commands::pack_and_go_aicad_project,
+            project_commands::open_aicad_document,
+            project_commands::import_aicad_document,
+            project_commands::save_aicad_document,
+            project_commands::undo_aicad_container,
             session_commands::fetch_tree_slice,
             session_commands::search_assembly_tree,
             session_commands::fetch_hlod_chunk,

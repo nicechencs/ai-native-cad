@@ -248,6 +248,19 @@ for source in "${binary_sources[@]}"; do
     binary_names+=("${source##*/}")
 done
 
+stage_cad_agent() {
+    local src_cli="$repo_root/services/cad-agent/src/cad_agent/cli.py"
+    [[ -f "$src_cli" ]] || fail "cad_agent.cli source not found at $src_cli"
+    mkdir -p -- "$stage_dir/services/cad-agent/src"
+    tar -C "$repo_root/services/cad-agent/src" --exclude='__pycache__' --exclude='*.pyc' --exclude='*.pyo' -cf - cad_agent \
+        | tar -C "$stage_dir/services/cad-agent/src" -xf -
+    if [[ -f "$repo_root/services/cad-agent/pyproject.toml" ]]; then
+        cp -p -- "$repo_root/services/cad-agent/pyproject.toml" "$stage_dir/services/cad-agent/"
+    fi
+    [[ -f "$stage_dir/services/cad-agent/src/cad_agent/cli.py" ]] || fail "Failed to stage cad_agent.cli into the portable bundle."
+}
+stage_cad_agent
+
 {
     printf 'AI-Native CAD %s portable bundle\n\n' "$version"
     if ! $cli_only; then
@@ -261,6 +274,7 @@ done
             macos) printf 'Set DYLD_LIBRARY_PATH to the bundle directory when using the bundled OCCT libraries.\n' ;;
         esac
     fi
+    printf 'This bundle includes services/cad-agent for the desktop AI assistant. The workbench locates it next to the executable.\n'
     printf 'Use SHA256SUMS.txt to verify the packaged binaries.\n'
 } > "$stage_dir/README-PORTABLE.txt"
 

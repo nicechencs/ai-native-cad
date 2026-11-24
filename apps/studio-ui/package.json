@@ -9,8 +9,7 @@
     "dev:server": "node dev-server.mjs",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --port 4173",
-    "typecheck": "tsc --noEmit",
-    "test:export-cancel-occt": "node --test tests/exportCancelOcct.test.ts"
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",

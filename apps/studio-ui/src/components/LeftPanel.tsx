@@ -43,6 +43,7 @@ import { CadIcon } from "../ui/icons/CadIcons.tsx";
 import { TraceIdChip } from "./TraceIdChip.tsx";
 import { traceIdFrom } from "../utils/trace.ts";
 import { focusWorkbenchTab, WorkbenchTabPanel, WorkbenchTabs } from "./WorkbenchTabs.tsx";
+import { modelBrowserTopoBadge } from "./modelBrowserCounts.ts";
 
 const LEFT_TABS = [
   { id: "model", label: "模型树" },
@@ -487,6 +488,7 @@ export function LeftPanel({
   onStartSketchOnDatum,
   onAiRepairNode,
 }: LeftPanelProps) {
+  const browserTopoBadge = modelBrowserTopoBadge(diagnosticsReport.metrics, sceneMesh);
   const mountedFeatureTree = useContext(FeatureTreeMountContext);
   const mountedAssemblyTree = useContext(AssemblyTreeMountContext);
   const featureTree = resolveFeatureTreeMount({
@@ -751,8 +753,11 @@ export function LeftPanel({
           <section className="card model-browser">
             <div className="card-header">
               <h2 className="card-title">模型浏览器</h2>
-              <span className="mini-badge">
-                {sceneMesh.faces.length}F / {sceneMesh.edges.length}E
+              <span
+                className="mini-badge"
+                title={browserTopoBadge.source === "kernel" ? "内核面数 / 边数" : "预览网格面数 / 边数（暂无内核计数）"}
+              >
+                {browserTopoBadge.faces}F / {browserTopoBadge.edges}E
               </span>
             </div>
             <div className="model-browser-subhead">

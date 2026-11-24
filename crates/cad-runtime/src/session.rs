@@ -27,9 +27,9 @@ use cad_ir::{
     validate_graph,
 };
 use cad_kernel_occt::{
-    BBox3, BRepEdge, BRepFace, CurveType, GeometryKernel, IBRepKernel, KernelError,
-    OcctImportFormat, OcctImportOptions, SolidShape, SurfaceType, default_brep_kernel,
-    import_occt_bytes,
+    BBox3, BRepEdge, BRepFace, ComponentMeta, CsgNode, CurveType, GeometryKernel, IBRepKernel,
+    KernelError, KernelPayload, OcctImportFormat, OcctImportOptions, SolidShape, SurfaceType,
+    default_brep_kernel, import_occt_bytes,
 };
 use cad_topo::{
     CurveClass, EntityKind, EvolutionOptions, GeometricFingerprint, SurfaceClass, TopoSnapshot,
@@ -1813,28 +1813,15 @@ fn export_artifact(
     }
     let (geometry_bytes, preserved, not_preserved) = fidelity(format, authoritative);
     let kernel = session.kernel.as_ref();
+    let selected = order_selected_by_graph_outputs(&session.graph, selected);
     let (exported_node_id, bytes) = match format {
-        "3mf" => {
-            let node_id = primary_solid(&session.graph, kernel, &selected)
-                .ok()
-                .map(|(id, _)| id.0.clone());
-            (
-                node_id,
-                mesh_bytes(&selected, label.unwrap_or(&session.project_name))?,
-            )
-        }
-        "dxf" => {
-            let primary = primary_solid(&session.graph, kernel, &selected)?;
-            (Some(primary.0.0.clone()), text_bytes(&drawing_dxf(kernel, primary)?))
-        }
-        "svg" => {
-            let primary = primary_solid(&session.graph, kernel, &selected)?;
-            (Some(primary.0.0.clone()), text_bytes(&drawing_svg(kernel, primary)?))
-        }
-        _ => {
-            let primary = primary_solid(&session.graph, kernel, &selected)?;
-            (Some(primary.0.0.clone()), text_bytes(&step_bytes(kernel, primary)?))
-        }
+        "3mf" => (
+            export_scope_ids(&selected),
+            mesh_bytes(&selected, label.unwrap_or(&session.project_name))?,
+        ),
+        "dxf" => export_drawing_bytes(&selected, label, kernel, drawing_dxf)?,
+        "svg" => export_drawing_bytes(&selected, label, kernel, drawing_svg)?,
+        _ => export_step_bytes(&selected, label.unwrap_or(&session.project_name), kernel)?,
     };
     crate::write_file_atomic(&resolved, &bytes)?;
     Ok(ExportArtifactReport {
@@ -2134,6 +2121,109 @@ fn terminal_descendants(
         }
     }
     finished
+}
+
+
+fn order_selected_by_graph_outputs<'a>(
+    graph: &CanonicalGraph,
+    mut selected: Vec<(&'a NodeId, &'a SolidShape)>,
+) -> Vec<(&'a NodeId, &'a SolidShape)> {
+    selected.sort_by_key(|(id, _)| {
+        graph
+            .outputs
+            .iter()
+            .position(|out| out == *id)
+            .unwrap_or(usize::MAX)
+    });
+    selected
+}
+
+fn export_scope_ids(selected: &[(&NodeId, &SolidShape)]) -> Option<String> {
+    if selected.is_empty() {
+        return None;
+    }
+    Some(
+        selected
+            .iter()
+            .map(|(id, _)| id.0.as_str())
+            .collect::<Vec<_>>()
+            .join(","),
+    )
+}
+
+fn grouped_finished_solid(selected: &[(&NodeId, &SolidShape)], name: &str) -> SolidShape {
+    if let [(_, solid)] = selected {
+        return (*solid).clone();
+    }
+    let mut group = SolidShape::empty(name);
+    let mut csg_items = Vec::with_capacity(selected.len());
+    for (id, solid) in selected {
+        let mut placed = (*solid).clone();
+        let cid = id.0.clone();
+        let part_name = if placed.part_name.is_empty() {
+            cid.clone()
+        } else {
+            placed.part_name.clone()
+        };
+        placed.part_name = part_name.clone();
+        for face in &mut placed.faces {
+            face.component_id = Some(cid.clone());
+            face.face_id = format!("{cid}_{}", face.face_id);
+        }
+        for edge in &mut placed.edges {
+            edge.component_id = Some(cid.clone());
+            edge.edge_id = format!("{cid}_{}", edge.edge_id);
+        }
+        group.components.push(ComponentMeta {
+            component_id: cid,
+            part_name,
+            origin_mm: [0.0; 3],
+            rotation_deg: [0.0; 3],
+            volume_mm3: 0.0,
+            bbox_mm: BBox3::default(),
+        });
+        group.exact_brep &= placed.exact_brep;
+        csg_items.push(placed.csg);
+        group.faces.extend(placed.faces);
+        group.edges.extend(placed.edges);
+        group.pmi.extend(placed.pmi);
+    }
+    group.csg = CsgNode::Union(csg_items);
+    group.payload = KernelPayload::Analytic;
+    group.part_name = name.to_owned();
+    group
+}
+
+fn export_step_bytes(
+    selected: &[(&NodeId, &SolidShape)],
+    name: &str,
+    kernel: &dyn GeometryKernel,
+) -> Result<(Option<String>, Vec<u8>), RuntimeError> {
+    let ids = export_scope_ids(selected);
+    if selected.len() == 1 {
+        return Ok((ids, text_bytes(&step_bytes(kernel, selected[0])?)));
+    }
+    let group = grouped_finished_solid(selected, name);
+    Ok((
+        ids,
+        text_bytes(&kernel.export_step(&group).map_err(RuntimeError::Eval)?),
+    ))
+}
+
+fn export_drawing_bytes(
+    selected: &[(&NodeId, &SolidShape)],
+    label: Option<&str>,
+    kernel: &dyn GeometryKernel,
+    render: fn(&dyn GeometryKernel, (&NodeId, &SolidShape)) -> Result<String, RuntimeError>,
+) -> Result<(Option<String>, Vec<u8>), RuntimeError> {
+    let ids = export_scope_ids(selected);
+    if selected.len() == 1 {
+        return Ok((ids, text_bytes(&render(kernel, selected[0])?)));
+    }
+    let name = label.unwrap_or("export");
+    let group = grouped_finished_solid(selected, name);
+    let group_id = NodeId::from(name);
+    Ok((ids, text_bytes(&render(kernel, (&group_id, &group))?)))
 }
 
 fn primary_solid<'a>(

@@ -249,6 +249,22 @@ try {
             }
         })
 
+        $AgentCli = Join-Path $RepoRoot "services/cad-agent/src/cad_agent/cli.py"
+        if (-not (Test-Path -LiteralPath $AgentCli -PathType Leaf)) {
+            throw "cad_agent.cli source not found at $AgentCli"
+        }
+        $AgentDest = Join-Path $StageDir "services/cad-agent/src/cad_agent"
+        New-Item -ItemType Directory -Force -Path $AgentDest | Out-Null
+        Copy-Item -Path (Join-Path $RepoRoot "services/cad-agent/src/cad_agent/*") -Destination $AgentDest -Recurse -Force
+        Get-ChildItem -LiteralPath $AgentDest -Recurse -Directory -Filter "__pycache__" -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+        $PyProject = Join-Path $RepoRoot "services/cad-agent/pyproject.toml"
+        if (Test-Path -LiteralPath $PyProject -PathType Leaf) {
+            Copy-Item -LiteralPath $PyProject -Destination (Join-Path $StageDir "services/cad-agent/pyproject.toml")
+        }
+        if (-not (Test-Path -LiteralPath (Join-Path $AgentDest "cli.py") -PathType Leaf)) {
+            throw "Failed to stage cad_agent.cli into the portable bundle."
+        }
+
         $PortableReadme = @("AI-Native CAD $Version portable bundle", "")
         if (-not $CliOnly) {
             $PortableReadme += "Open ai-native-cad-desktop.exe to start the desktop workbench."
@@ -257,6 +273,7 @@ try {
             "Run cad-cli.exe --help to list CLI commands."
             "Run cad-cli.exe daemon to start the CLI daemon."
             "For the web workbench, run start-web-workbench.cmd from a source checkout."
+            "This bundle includes services/cad-agent for the desktop AI assistant. The workbench locates it next to the executable."
             "Use SHA256SUMS.txt to verify the packaged binaries."
         )
         $Launcher = @'

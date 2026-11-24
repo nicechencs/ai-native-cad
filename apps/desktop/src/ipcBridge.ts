@@ -33,6 +33,9 @@ export interface EngineStatus {
   readonly occt_available: boolean;
   readonly wgpu_backend: string;
   readonly offline_ready: boolean;
+  readonly kernel_backend?: string;
+  readonly kernel_authoritative?: boolean;
+  readonly fallback_reason?: string;
 }
 
 export interface CompileKclRequest {
@@ -70,6 +73,7 @@ export interface ExportRequest {
   readonly views?: readonly string[];
   /** Workbench trace id. Required for desktop STEP, DXF, drawing SVG, and 3MF cancel to name one publication. */
   readonly trace_id?: string;
+  readonly allow_non_authoritative_preview?: boolean;
 }
 
 export interface ExportResult {
@@ -78,6 +82,8 @@ export interface ExportResult {
   readonly bytes_written: number;
   readonly pmi_entity_count: number;
   readonly message: string;
+  readonly authoritative?: boolean;
+  readonly kernel_backend?: string;
 }
 
 export interface WorkspaceAsset {
@@ -131,6 +137,59 @@ export interface ApplyAicadPatchIpcRequest {
 export interface EmitAicadKclIpcRequest {
   readonly project_path: string;
   readonly workspace_root?: string;
+}
+
+export interface OpenAicadDocumentIpcRequest {
+  readonly project_path: string;
+  readonly workspace_root?: string;
+}
+
+export interface ImportAicadDocumentIpcRequest {
+  readonly file_name: string;
+  readonly contents_base64: string;
+  readonly workspace_root?: string;
+}
+
+export interface SaveAicadDocumentIpcRequest {
+  readonly project_path: string;
+  readonly project_name: string;
+  readonly source: string;
+  readonly workspace_root?: string;
+}
+
+export interface AicadContainerHistoryIpc {
+  readonly can_rollback: boolean;
+  readonly oplog_len: number;
+  readonly head_seq?: number | null;
+  readonly previous_seq?: number | null;
+}
+
+export interface OpenAicadDocumentResult {
+  readonly status: "ok";
+  readonly project_path: string;
+  readonly project_name: string;
+  readonly source: string;
+  readonly history?: AicadContainerHistoryIpc;
+}
+
+export interface SaveAicadDocumentResult {
+  readonly status: "ok";
+  readonly project_path: string;
+  readonly project_name: string;
+  readonly history?: AicadContainerHistoryIpc;
+}
+
+export interface UndoAicadContainerIpcRequest {
+  readonly project_path: string;
+  readonly workspace_root?: string;
+}
+
+export interface UndoAicadContainerResult {
+  readonly status: "ok";
+  readonly project_path: string;
+  readonly project_name: string;
+  readonly source: string;
+  readonly history: AicadContainerHistoryIpc;
 }
 
 export interface BranchAicadProjectIpcRequest {
@@ -487,14 +546,19 @@ async function listenTauriEvent<T>(
   const callbackId = invoker.transformCallback((response: TauriEventEnvelope<T>) => {
     if (response.payload !== undefined) handler(response.payload);
   });
-  const eventId = await invoker.invoke<number>("plugin:event|listen", {
-    event,
-    target: { kind: "Any" },
-    handler: callbackId,
-  });
-  return () => {
-    void invoker.invoke<void>("plugin:event|unlisten", { event, eventId }).catch(() => {});
-  };
+  try {
+    const eventId = await invoker.invoke<number>("plugin:event|listen", {
+      event,
+      target: { kind: "Any" },
+      handler: callbackId,
+    });
+    return () => {
+      void invoker.invoke<void>("plugin:event|unlisten", { event, eventId }).catch(() => {});
+    };
+  } catch (error) {
+    console.warn("Tauri event listen failed; continuing without streaming progress.", error);
+    return () => {};
+  }
 }
 
 export interface DesktopIpcClient {
@@ -527,6 +591,10 @@ export interface DesktopIpcClient {
   sliceAicadContext(request: SliceAicadContextIpcRequest): Promise<DesktopContextSliceResponse>;
   vacuumAicadProject(request: VacuumAicadProjectIpcRequest): Promise<DesktopVacuumReport>;
   packAndGoAicadProject(request: PackAndGoAicadProjectIpcRequest): Promise<DesktopPackAndGoResponse>;
+  openAicadDocument(request: OpenAicadDocumentIpcRequest): Promise<OpenAicadDocumentResult>;
+  importAicadDocument(request: ImportAicadDocumentIpcRequest): Promise<OpenAicadDocumentResult>;
+  saveAicadDocument(request: SaveAicadDocumentIpcRequest): Promise<SaveAicadDocumentResult>;
+  undoAicadContainer(request: UndoAicadContainerIpcRequest): Promise<UndoAicadContainerResult>;
 }
 
 const nativeLittleEndian = new Uint8Array(Uint32Array.of(1).buffer)[0] === 1;
@@ -797,6 +865,30 @@ export function createDesktopIpcClient(): DesktopIpcClient {
       const invoker = getTauriInvoker();
       if (!invoker) throw new Error("pack_and_go_aicad_project IPC requires the Tauri v2 desktop runtime.");
       return invoker.invoke<DesktopPackAndGoResponse>("pack_and_go_aicad_project", { request });
+    },
+
+    async openAicadDocument(request: OpenAicadDocumentIpcRequest): Promise<OpenAicadDocumentResult> {
+      const invoker = getTauriInvoker();
+      if (!invoker) throw new Error("open_aicad_document IPC requires the Tauri v2 desktop runtime.");
+      return invoker.invoke<OpenAicadDocumentResult>("open_aicad_document", { request });
+    },
+
+    async importAicadDocument(request: ImportAicadDocumentIpcRequest): Promise<OpenAicadDocumentResult> {
+      const invoker = getTauriInvoker();
+      if (!invoker) throw new Error("import_aicad_document IPC requires the Tauri v2 desktop runtime.");
+      return invoker.invoke<OpenAicadDocumentResult>("import_aicad_document", { request });
+    },
+
+    async saveAicadDocument(request: SaveAicadDocumentIpcRequest): Promise<SaveAicadDocumentResult> {
+      const invoker = getTauriInvoker();
+      if (!invoker) throw new Error("save_aicad_document IPC requires the Tauri v2 desktop runtime.");
+      return invoker.invoke<SaveAicadDocumentResult>("save_aicad_document", { request });
+    },
+
+    async undoAicadContainer(request: UndoAicadContainerIpcRequest): Promise<UndoAicadContainerResult> {
+      const invoker = getTauriInvoker();
+      if (!invoker) throw new Error("undo_aicad_container IPC requires the Tauri v2 desktop runtime.");
+      return invoker.invoke<UndoAicadContainerResult>("undo_aicad_container", { request });
     },
   };
 }

@@ -1,5 +1,5 @@
 use cad_hir::{DimType, IrExpr};
-use cad_ir::{IrType, IrValue};
+use cad_ir::{BuiltinFunc, IrType, IrValue, Quantity};
 use cad_syntax::{BinaryOp, Span, UnaryOp};
 
 use super::{Lowering, Result, at};
@@ -87,7 +87,13 @@ impl Lowering {
                     _ => Err(at(right.span(), "expected an operation after `|>`")),
                 }
             }
-            IrExpr::Call { callee, args, .. } => self.call(callee, args, None, name, span),
+            IrExpr::Call { callee, args, .. } => {
+                if let Some(func) = BuiltinFunc::parse(callee) {
+                    self.scalar_builtin(func, args, name, span)
+                } else {
+                    self.call(callee, args, None, name, span)
+                }
+            }
             IrExpr::MethodCall {
                 receiver,
                 method,
@@ -215,6 +221,52 @@ impl Lowering {
             }
             _ => Err(at(span, "expected a nonnegative integer array count")),
         }
+    }
+
+
+    pub(super) fn scalar_builtin(
+        &mut self,
+        func: BuiltinFunc,
+        args: &[cad_hir::IrArg],
+        name: Option<&str>,
+        span: cad_syntax::Span,
+    ) -> Result<IrValue> {
+        if args.iter().any(|arg| arg.name.is_some()) {
+            return Err(at(
+                span,
+                format!("`{}` does not accept named arguments", func.as_str()),
+            ));
+        }
+        if args.len() != func.arity() {
+            return Err(at(
+                span,
+                format!(
+                    "`{}` expects {} argument(s), got {}",
+                    func.as_str(),
+                    func.arity(),
+                    args.len()
+                ),
+            ));
+        }
+        let values = args
+            .iter()
+            .map(|arg| self.value(&arg.value, None))
+            .collect::<Result<Vec<_>>>()?;
+        let literals: Vec<IrValue> = values
+            .iter()
+            .map(|value| self.nominal(value).clone())
+            .collect();
+        let result = eval_scalar_builtin(func, &literals, span)?;
+        let formula = Some(format!(
+            "{}({})",
+            func.as_str(),
+            values
+                .iter()
+                .map(|value| self.formula_atom(value, span))
+                .collect::<Result<Vec<_>>>()?
+                .join(", ")
+        ));
+        Ok(self.computed(name, result, formula))
     }
 
     fn computed(&mut self, name: Option<&str>, value: IrValue, formula: Option<String>) -> IrValue {
@@ -375,4 +427,77 @@ fn binary_symbol(op: BinaryOp) -> &'static str {
         And => "&&",
         Or => "||",
     }
+}
+
+
+fn eval_scalar_builtin(
+    func: BuiltinFunc,
+    literals: &[IrValue],
+    span: cad_syntax::Span,
+) -> Result<IrValue> {
+    match func {
+        BuiltinFunc::Min | BuiltinFunc::Max => {
+            let left = &literals[0];
+            let right = &literals[1];
+            let left_ty = literal_type(left);
+            let right_ty = literal_type(right);
+            if left_ty != right_ty || left_ty.is_none() {
+                return Err(at(
+                    span,
+                    format!(
+                        "`{}` requires matching numeric dimensions, got {:?} and {:?}",
+                        func.as_str(),
+                        left_ty,
+                        right_ty
+                    ),
+                ));
+            }
+            let pick_left = if func == BuiltinFunc::Min {
+                as_number(left, span)? <= as_number(right, span)?
+            } else {
+                as_number(left, span)? >= as_number(right, span)?
+            };
+            Ok(if pick_left { left.clone() } else { right.clone() })
+        }
+        BuiltinFunc::Abs => {
+            let value = &literals[0];
+            match value {
+                IrValue::Scalar(x) => Ok(IrValue::Scalar(x.abs())),
+                IrValue::Int(x) => Ok(IrValue::Int(x.abs())),
+                IrValue::Quantity(q) => Ok(IrValue::Quantity(quantity_with_canonical(*q, q.canonical_value().abs(), span)?)),
+                _ => Err(at(span, "`abs` expected a numeric argument")),
+            }
+        }
+        BuiltinFunc::Sqrt => {
+            let value = &literals[0];
+            if !matches!(value, IrValue::Scalar(_) | IrValue::Int(_)) {
+                return Err(at(span, "`sqrt` requires a dimensionless scalar argument"));
+            }
+            let x = as_number(value, span)?;
+            if x < 0.0 {
+                return Err(at(span, format!("`sqrt` domain error: negative input {x}")));
+            }
+            Ok(IrValue::Scalar(x.sqrt()))
+        }
+        BuiltinFunc::Sin | BuiltinFunc::Cos | BuiltinFunc::Tan => Err(at(
+            span,
+            format!("`{}` is not supported in CAD-DSL expressions yet", func.as_str()),
+        )),
+    }
+}
+
+fn quantity_with_canonical(
+    template: Quantity,
+    canonical: f64,
+    span: cad_syntax::Span,
+) -> Result<Quantity> {
+    let result = match template {
+        Quantity::Length { unit, .. } => Quantity::length(canonical / unit.to_mm(), unit),
+        Quantity::Angle { unit, .. } => Quantity::angle(canonical / unit.to_deg(), unit),
+        Quantity::Force { unit, .. } => Quantity::force(canonical / unit.to_newtons(), unit),
+        Quantity::Pressure { unit, .. } => Quantity::pressure(canonical / unit.to_mpa(), unit),
+        Quantity::Mass { unit, .. } => Quantity::mass(canonical / unit.to_kg(), unit),
+        Quantity::Density { .. } => Quantity::density(canonical),
+    };
+    result.map_err(|err| at(span, err.to_string()))
 }

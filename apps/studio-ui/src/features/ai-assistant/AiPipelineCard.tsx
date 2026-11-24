@@ -11,9 +11,11 @@ export interface AiPipelineCardProps {
   readonly item: AiThreadItem;
   readonly canUndo?: boolean;
   readonly onUndo?: () => void;
+  readonly onRetry?: () => void;
+  readonly onConfigure?: () => void;
 }
 
-export function AiPipelineCard({ item, canUndo, onUndo }: AiPipelineCardProps) {
+export function AiPipelineCard({ item, canUndo, onUndo, onRetry, onConfigure }: AiPipelineCardProps) {
   const [timelineExpanded, setTimelineExpanded] = useState(item.status === "running");
   const [diffExpanded, setDiffExpanded] = useState(false);
 
@@ -142,6 +144,23 @@ export function AiPipelineCard({ item, canUndo, onUndo }: AiPipelineCardProps) {
             )}
           {item.feedback?.retrievedExamples && item.feedback.retrievedExamples.length > 0 && (
             <span className="mini-badge">参考 {item.feedback.retrievedExamples.length} 样本</span>
+          )}
+        </div>
+      )}
+
+      {isError && (onRetry || onConfigure) && (
+        <div className="ai-run-actions">
+          {onRetry && (
+            <button type="button" className="studio-btn studio-btn-sm" onClick={onRetry}>
+              <CadIcon name="refresh" size={12} />
+              <span>重试</span>
+            </button>
+          )}
+          {onConfigure && (
+            <button type="button" className="studio-btn studio-btn-sm" onClick={onConfigure}>
+              <CadIcon name="settings" size={12} />
+              <span>配置密钥</span>
+            </button>
           )}
         </div>
       )}

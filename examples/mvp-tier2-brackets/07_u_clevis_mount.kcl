@@ -1,0 +1,95 @@
+// MVP Tier 2 Golden Part 07: U 型重载耳座接头（闭合拱形耳片草图 + 中央铣削开槽 + 同轴 H7 销轴孔）
+
+@unit(length = "mm", angle = "deg", force = "N")
+@material("45# Steel")
+@manufacturing(method = "CNC_3AXIS_MILLING", min_tool_radius = 2.0mm)
+
+part UClevisMount(
+    base_length: Length = 84.0mm,
+    base_width: Length = 60.0mm,
+    base_thickness: Length = 14.0mm,
+    ear_thickness: Length = 12.0mm,
+    ear_gap: Length = 26.0mm,
+    ear_radius: Length = 20.0mm,
+    pin_center_z: Length = 46.0mm,
+    pin_bore_d: Length = 16.0mm @pmi::tolerance("H7", roughness = "Ra0.8")
+) -> Solid {
+    let total_ear_span = ear_gap + 2.0 * ear_thickness
+
+    let base_plate = box(
+        size = [base_length, base_width, base_thickness],
+        origin = [-base_length / 2.0, -base_width / 2.0, 0.0mm]
+    )
+    |> fillet(r = 4.0mm)
+
+    // 闭合拱形耳片轮廓（直线 + 顶部半圆弧相切约束）
+    let ear_blank = sketch(plane = XZ_PLANE) {
+        let p_bl = point(x = -ear_radius, z = base_thickness)
+        let p_br = point(x = ear_radius, z = base_thickness)
+        let p_tr = point(x = ear_radius, z = pin_center_z)
+        let p_tl = point(x = -ear_radius, z = pin_center_z)
+
+        let e_bot = line(from = p_bl, to = p_br)
+        let e_right = line(from = p_br, to = p_tr)
+        let e_top = arc(from = p_tr, to = p_tl, radius = ear_radius)
+        let e_left = line(from = p_tl, to = p_bl)
+        region::closed([e_bot, e_right, e_top, e_left])
+
+        constraint::horizontal(e_bot)
+        constraint::vertical(e_right)
+        constraint::vertical(e_left)
+        constraint::tangent(edge = e_top, target = e_right, at = p_tr)
+        constraint::tangent(edge = e_top, target = e_left, at = p_tl)
+    }
+    |> extrude_symmetric(thickness = total_ear_span)
+
+    let merged_blank = boolean::union(items = [base_plate, ear_blank])
+
+    let clevis_slot_tool = box(
+        size = [2.0 * ear_radius + 4.0mm, ear_gap, pin_center_z + ear_radius],
+        origin = [-(ear_radius + 2.0mm), -ear_gap / 2.0, base_thickness]
+    )
+
+    let pin_bore_tool = cylinder(
+        d = pin_bore_d,
+        h = total_ear_span + 4.0mm,
+        origin = [0.0mm, -(total_ear_span / 2.0 + 2.0mm), pin_center_z],
+        axis = Y_AXIS,
+        exact_brep = true
+    )
+    |> tag::cylindrical_faces("clevis_pin_bore")
+
+    let bolt_row_left = hole::counterbore(
+        d_through = 6.6mm,
+        d_cbore = 11.0mm,
+        depth_cbore = 6.4mm,
+        depth_through = base_thickness + 2.0mm,
+        origin = [-30.0mm, -18.0mm, base_thickness]
+    )
+    |> array::linear(axis = Y_AXIS, count = 2, spacing = 36.0mm)
+
+    let bolt_row_right = hole::counterbore(
+        d_through = 6.6mm,
+        d_cbore = 11.0mm,
+        depth_cbore = 6.4mm,
+        depth_through = base_thickness + 2.0mm,
+        origin = [30.0mm, -18.0mm, base_thickness]
+    )
+    |> array::linear(axis = Y_AXIS, count = 2, spacing = 36.0mm)
+
+    let final_part = merged_blank
+        |> boolean::subtract(
+            tools = [clevis_slot_tool, pin_bore_tool, bolt_row_left, bolt_row_right],
+            preserve_exact_interfaces = true
+        )
+
+    let datum_a = final_part.faces().planar().filter(normal = -Z).min_by(coord = Z)
+        |> pmi::datum("A", flatness = 0.02mm)
+    let pin_surface = final_part.faces().tagged("clevis_pin_bore")
+        |> pmi::perpendicularity(tol = 0.015mm, datum = "A")
+
+    assert::bbox(target = final_part, max_size = [90.0mm, 65.0mm, 72.0mm])
+    assert::dfm_accessible(target = final_part, axes = [+Z, +Y, -Y], min_wall_thickness = 3.0mm)
+
+    return final_part
+}

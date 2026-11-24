@@ -1,0 +1,91 @@
+// MVP Tier 2 Golden Part 06: L 型精密传感器支架（XZ 闭合轮廓对称拉伸 + 正交 H7 传感器孔 + PMI 垂直度）
+
+@unit(length = "mm", angle = "deg", force = "N")
+@material("Al-6061-T6")
+@manufacturing(method = "CNC_3AXIS_MILLING", min_tool_radius = 2.0mm)
+
+part LSensorBracket(
+    bracket_width: Length = 60.0mm,
+    base_length: Length = 70.0mm,
+    vertical_height: Length = 65.0mm,
+    wall_thickness: Length = 10.0mm,
+    sensor_bore_d: Length = 22.0mm @pmi::tolerance("H7", roughness = "Ra1.6"),
+    sensor_axis_z: Length = 40.0mm
+) -> Solid {
+    let bracket_body = sketch(plane = XZ_PLANE) {
+        let p0 = point(x = 0.0mm, z = 0.0mm)
+        let p1 = point(x = base_length, z = 0.0mm)
+        let p2 = point(x = base_length, z = wall_thickness)
+        let p3 = point(x = wall_thickness, z = wall_thickness)
+        let p4 = point(x = wall_thickness, z = vertical_height)
+        let p5 = point(x = 0.0mm, z = vertical_height)
+
+        let e0 = line(from = p0, to = p1)
+        let e1 = line(from = p1, to = p2)
+        let e2 = line(from = p2, to = p3)
+        let e3 = line(from = p3, to = p4)
+        let e4 = line(from = p4, to = p5)
+        let e5 = line(from = p5, to = p0)
+        region::closed([e0, e1, e2, e3, e4, e5])
+
+        constraint::horizontal(e0)
+        constraint::vertical(e1)
+        constraint::horizontal(e2)
+        constraint::vertical(e3)
+        constraint::horizontal(e4)
+        constraint::vertical(e5)
+    }
+    |> extrude_symmetric(thickness = bracket_width)
+    |> fillet(r = 2.0mm)
+
+    let sensor_bore_tool = cylinder(
+        d = sensor_bore_d,
+        h = wall_thickness + 2.0mm,
+        origin = [-1.0mm, 0.0mm, sensor_axis_z],
+        axis = X_AXIS,
+        exact_brep = true
+    )
+    |> tag::cylindrical_faces("sensor_pilot_bore")
+
+    let sensor_bolts_lower = cylinder(
+        d = 4.5mm,
+        h = wall_thickness + 2.0mm,
+        origin = [-1.0mm, -16.0mm, sensor_axis_z - 16.0mm],
+        axis = X_AXIS
+    )
+    |> array::linear(axis = Y_AXIS, count = 2, spacing = 32.0mm)
+
+    let sensor_bolts_upper = cylinder(
+        d = 4.5mm,
+        h = wall_thickness + 2.0mm,
+        origin = [-1.0mm, -16.0mm, sensor_axis_z + 16.0mm],
+        axis = X_AXIS
+    )
+    |> array::linear(axis = Y_AXIS, count = 2, spacing = 32.0mm)
+
+    let base_mount_holes = hole::counterbore(
+        d_through = 6.6mm,
+        d_cbore = 11.0mm,
+        depth_cbore = 5.0mm,
+        depth_through = wall_thickness + 2.0mm,
+        origin = [45.0mm, -18.0mm, wall_thickness]
+    )
+    |> array::linear(axis = Y_AXIS, count = 2, spacing = 36.0mm)
+    |> tag::faces("base_mounting_holes")
+
+    let final_part = bracket_body
+        |> boolean::subtract(
+            tools = [sensor_bore_tool, sensor_bolts_lower, sensor_bolts_upper, base_mount_holes],
+            preserve_exact_interfaces = true
+        )
+
+    let datum_a = final_part.faces().planar().filter(normal = -Z).min_by(coord = Z)
+        |> pmi::datum("A", flatness = 0.02mm)
+    let datum_b = final_part.faces().planar().filter(normal = -X).min_by(coord = X)
+        |> pmi::perpendicularity(tol = 0.02mm, datum = "A")
+
+    assert::bbox(target = final_part, max_size = [75.0mm, 65.0mm, 70.0mm])
+    assert::dfm_accessible(target = final_part, axes = [+Z, +X, -X], min_wall_thickness = 3.0mm)
+
+    return final_part
+}

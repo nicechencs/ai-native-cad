@@ -1,0 +1,86 @@
+// MVP Tier 2 Golden Part 09: 纯精确 B-Rep 带筋法兰轴支撑座（4x 对称加强筋 + H7 轴孔 + M6 沉头螺栓）
+
+@unit(length = "mm", angle = "deg", force = "N")
+@material("Al-6061-T6")
+@manufacturing(method = "CNC_3AXIS_MILLING", min_tool_radius = 2.0mm)
+
+part RibbedShaftSupport(
+    bore_d: Length = 30.0mm @pmi::tolerance("H7", roughness = "Ra1.6"),
+    wall_thickness: Length = 7.0mm,
+    flange_od: Length = 100.0mm,
+    base_thickness: Length = 10.0mm,
+    hub_height: Length = 42.0mm,
+    rib_count: u32 = 4
+) -> Solid {
+    let hub_od = bore_d + 2.0 * wall_thickness
+    let hub_radius = hub_od / 2.0
+
+    let flange = cylinder(
+        d = flange_od,
+        h = base_thickness,
+        origin = [0.0mm, 0.0mm, 0.0mm]
+    )
+    let hub = cylinder(
+        d = hub_od,
+        h = hub_height,
+        origin = [0.0mm, 0.0mm, 0.0mm]
+    )
+
+    // 闭合三角形加强筋草图（XZ 平面，内嵌 1mm 保证精确 B-Rep 布尔并集无擦边退化）
+    let single_rib = sketch(plane = XZ_PLANE) {
+        let p_corner = point(x = hub_radius - 1.0mm, z = base_thickness)
+        let p_top = point(x = hub_radius - 1.0mm, z = hub_height - 5.0mm)
+        let p_foot = point(x = flange_od / 2.0 - 8.0mm, z = base_thickness)
+
+        let inner_edge = line(from = p_corner, to = p_top)
+        let diag_edge = line(from = p_top, to = p_foot)
+        let base_edge = line(from = p_foot, to = p_corner)
+        region::closed([inner_edge, diag_edge, base_edge])
+
+        constraint::vertical(inner_edge)
+        constraint::horizontal(base_edge)
+    }
+    |> extrude_symmetric(thickness = 6.0mm)
+
+    let ribs = array::polar(
+        feature = single_rib,
+        axis = Z_AXIS,
+        count = rib_count
+    )
+
+    let body_solid = boolean::union(items = [flange, hub, ribs])
+
+    let shaft_bore_tool = cylinder(
+        d = bore_d,
+        h = hub_height + 2.0mm,
+        origin = [0.0mm, 0.0mm, -1.0mm],
+        exact_brep = true
+    )
+    |> tag::cylindrical_faces("shaft_bore_wall")
+
+    let bolt_circle_holes = hole::counterbore(
+        d_through = 6.6mm,
+        d_cbore = 11.0mm,
+        depth_cbore = 6.2mm,
+        depth_through = base_thickness + 2.0mm,
+        origin = [38.0mm, 0.0mm, base_thickness]
+    )
+    |> array::polar(axis = Z_AXIS, radius = 38.0mm, count = rib_count, start_angle = 45.0deg)
+    |> tag::faces("support_mounting_holes")
+
+    let final_part = body_solid
+        |> boolean::subtract(
+            tools = [shaft_bore_tool, bolt_circle_holes],
+            preserve_exact_interfaces = true
+        )
+
+    let bottom_datum = final_part.faces().planar().filter(normal = -Z).min_by(coord = Z)
+        |> pmi::datum("A", flatness = 0.02mm)
+    let bore_surface = final_part.faces().tagged("shaft_bore_wall")
+        |> pmi::perpendicularity(tol = 0.015mm, datum = "A")
+
+    assert::bbox(target = final_part, max_size = [105.0mm, 105.0mm, 48.0mm])
+    assert::dfm_accessible(target = final_part, axes = [+Z, -Z], min_wall_thickness = 3.0mm)
+
+    return final_part
+}

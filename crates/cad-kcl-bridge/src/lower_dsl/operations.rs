@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use cad_hir::{DimType, IrArg, IrExpr, IrSketchStmt};
-use cad_ir::{
+use cad_ir::{BuiltinFunc,
     AngleUnit, BooleanOpKind, ComponentSourceSpec, DatumPlane, DesignAssertionKind, DimInput,
     DirectFaceEditOp, FEATURE_SPEC_PORT, FeatureBodyOp, FeatureSpec, IntInput, IrType, IrValue,
     LengthUnit, NodeId, NodeKind, Quantity, SketchDimValue, SketchEntity2D, SketchPlaneSpec,
@@ -26,6 +26,12 @@ impl Lowering {
         use NodeKind::*;
         if piped.is_none() && self.parts.contains_key(callee) {
             return self.call_part(callee, args, span);
+        }
+        if let Some(func) = BuiltinFunc::parse(callee) {
+            if piped.is_some() {
+                return Err(at(span, format!("`{callee}` does not accept a pipe input")));
+            }
+            return self.scalar_builtin(func, args, name, span);
         }
         let (kind, output, receiver, positional): (_, _, _, &[&str]) = match callee {
             "box" => (PrimitiveBox, IrType::Solid, None, &["size", "origin"]),

@@ -1,0 +1,185 @@
+{
+  "project_name": "FlangedCollar",
+  "graph_id": "flanged-collar",
+  "commands": [
+    {
+      "command": "set_design_contract",
+      "args": {
+        "contract": {
+          "part_name": "FlangedCollar",
+          "summary": "Stepped flanged bearing collar with concentric through bore",
+          "material": "Al-6061-T6",
+          "manufacturing_method": "CNC_3AXIS_MILLING"
+        }
+      }
+    },
+    {
+      "command": "upsert_parameter",
+      "args": {
+        "name": "flange_radius",
+        "ir_type": "length",
+        "value": {
+          "type": "quantity",
+          "value": {
+            "dimension": "length",
+            "value": 36.0,
+            "unit": "mm"
+          }
+        }
+      }
+    },
+    {
+      "command": "upsert_parameter",
+      "args": {
+        "name": "flange_height",
+        "ir_type": "length",
+        "value": {
+          "type": "quantity",
+          "value": {
+            "dimension": "length",
+            "value": 10.0,
+            "unit": "mm"
+          }
+        }
+      }
+    },
+    {
+      "command": "upsert_parameter",
+      "args": {
+        "name": "hub_radius",
+        "ir_type": "length",
+        "value": {
+          "type": "quantity",
+          "value": {
+            "dimension": "length",
+            "value": 22.0,
+            "unit": "mm"
+          }
+        }
+      }
+    },
+    {
+      "command": "upsert_parameter",
+      "args": {
+        "name": "hub_height",
+        "ir_type": "length",
+        "value": {
+          "type": "quantity",
+          "value": {
+            "dimension": "length",
+            "value": 24.0,
+            "unit": "mm"
+          }
+        }
+      }
+    },
+    {
+      "command": "upsert_parameter",
+      "args": {
+        "name": "bore_diameter",
+        "ir_type": "length",
+        "value": {
+          "type": "quantity",
+          "value": {
+            "dimension": "length",
+            "value": 20.0,
+            "unit": "mm"
+          }
+        }
+      }
+    },
+    {
+      "command": "create_primitive_cylinder",
+      "args": {
+        "node_id": "flange_disc",
+        "name": "FlangeDisc",
+        "radius": {
+          "source": "param",
+          "param_id": "flange_radius"
+        },
+        "height": {
+          "source": "param",
+          "param_id": "flange_height"
+        },
+        "origin_mm": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "axis": [
+          0.0,
+          0.0,
+          1.0
+        ]
+      }
+    },
+    {
+      "command": "create_primitive_cylinder",
+      "args": {
+        "node_id": "center_hub",
+        "name": "CenterHub",
+        "radius": {
+          "source": "param",
+          "param_id": "hub_radius"
+        },
+        "height": {
+          "source": "param",
+          "param_id": "hub_height"
+        },
+        "origin_mm": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "axis": [
+          0.0,
+          0.0,
+          1.0
+        ]
+      }
+    },
+    {
+      "command": "boolean_solids",
+      "args": {
+        "node_id": "collar_body",
+        "name": "CollarBody",
+        "op": "union",
+        "target": "flange_disc",
+        "tools": [
+          "center_hub"
+        ]
+      }
+    },
+    {
+      "command": "create_hole",
+      "args": {
+        "node_id": "shaft_bore",
+        "name": "ShaftBore",
+        "solid": "collar_body",
+        "origin_mm": [
+          0.0,
+          0.0,
+          24.0
+        ],
+        "axis": [
+          0.0,
+          0.0,
+          -1.0
+        ],
+        "definition": {
+          "hole": "generic",
+          "diameter": {
+            "source": "param",
+            "param_id": "bore_diameter"
+          },
+          "depth": {
+            "kind": "through_all"
+          },
+          "profile": {
+            "kind": "simple"
+          }
+        }
+      }
+    }
+  ]
+}

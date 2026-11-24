@@ -248,7 +248,9 @@ export function RightPanel({
                 className={`badge ${
                   compilePending || diagnosticsReport.status === "error" || !metrics.watertight
                     ? "badge-err"
-                    : "badge-ok"
+                    : metrics.kernel_authoritative === false
+                      ? "badge-warn"
+                      : "badge-ok"
                 }`}
               >
                 {geometryAvailabilityBadge({
@@ -256,6 +258,7 @@ export function RightPanel({
                   faceCount: sceneMesh.faces.length,
                   diagnosticsStatus: diagnosticsReport.status,
                   watertight: metrics.watertight,
+                  kernelAuthoritative: metrics.kernel_authoritative,
                 })}
               </span>
             </div>

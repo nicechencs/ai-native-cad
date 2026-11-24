@@ -170,6 +170,9 @@ function listenWithInternals(
     handler: callbackId,
   }).then((eventId) => () => {
     void Promise.resolve(internals.invoke!("plugin:event|unlisten", { event, eventId })).catch(() => {});
+  }).catch((error) => {
+    console.warn("Live attach event listen failed; continuing without preview events.", error);
+    return () => {};
   });
 }
 

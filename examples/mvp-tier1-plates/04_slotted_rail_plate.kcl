@@ -1,0 +1,90 @@
+// MVP Tier 1 Golden Part 04: 可调腰形长槽导轨安装板（闭合相切跑道槽草图 + 线性阵列）
+
+@unit(length = "mm", angle = "deg", force = "N")
+@material("45# Steel")
+@manufacturing(method = "CNC_3AXIS_MILLING", min_tool_radius = 2.0mm)
+
+part SlottedRailPlate(
+    plate_length: Length = 140.0mm,
+    plate_width: Length = 70.0mm,
+    plate_thickness: Length = 10.0mm,
+    slot_width: Length = 9.0mm,
+    slot_center_dist: Length = 26.0mm,
+    slot_row_spacing: Length = 42.0mm
+) -> Solid {
+    let r_slot = slot_width / 2.0
+    let half_c = slot_center_dist / 2.0
+
+    let base_plate = box(
+        size = [plate_length, plate_width, plate_thickness],
+        origin = [-plate_length / 2.0, -plate_width / 2.0, 0.0mm]
+    )
+    |> fillet(r = 5.0mm)
+
+    // 中心高精度定位销孔（H7 配合）
+    let center_dowel_holes = cylinder(
+        d = 6.0mm @pmi::tolerance("H7"),
+        h = plate_thickness + 2.0mm,
+        origin = [0.0mm, -12.0mm, -1.0mm],
+        exact_brep = true
+    )
+    |> array::linear(axis = Y_AXIS, count = 2, spacing = 24.0mm)
+    |> tag::cylindrical_faces("rail_dowel_bores")
+
+    // 对称布置上下两排闭合相切腰形槽（y = ±21mm）
+    let rear_slot_pair = sketch(plane = XY_PLANE) {
+        let q_tl = point(x = -35.0mm - half_c, y = -slot_row_spacing / 2.0 + r_slot)
+        let q_tr = point(x = -35.0mm + half_c, y = -slot_row_spacing / 2.0 + r_slot)
+        let q_br = point(x = -35.0mm + half_c, y = -slot_row_spacing / 2.0 - r_slot)
+        let q_bl = point(x = -35.0mm - half_c, y = -slot_row_spacing / 2.0 - r_slot)
+
+        let t_line = line(from = q_tl, to = q_tr)
+        let r_arc = arc(from = q_tr, to = q_br, radius = r_slot)
+        let b_line = line(from = q_br, to = q_bl)
+        let l_arc = arc(from = q_bl, to = q_tl, radius = r_slot)
+        region::closed([t_line, r_arc, b_line, l_arc])
+
+        constraint::horizontal(t_line)
+        constraint::horizontal(b_line)
+        constraint::tangent(edge = r_arc, target = t_line, at = q_tr)
+        constraint::tangent(edge = l_arc, target = b_line, at = q_bl)
+    }
+    |> extrude(height = plate_thickness + 2.0mm)
+    |> array::linear(axis = X_AXIS, count = 2, spacing = 70.0mm)
+    |> tag::faces("adjustment_slots")
+
+    let upper_slot_pair = sketch(plane = XY_PLANE) {
+        let u_tl = point(x = -35.0mm - half_c, y = slot_row_spacing / 2.0 + r_slot)
+        let u_tr = point(x = -35.0mm + half_c, y = slot_row_spacing / 2.0 + r_slot)
+        let u_br = point(x = -35.0mm + half_c, y = slot_row_spacing / 2.0 - r_slot)
+        let u_bl = point(x = -35.0mm - half_c, y = slot_row_spacing / 2.0 - r_slot)
+
+        let ut_line = line(from = u_tl, to = u_tr)
+        let ur_arc = arc(from = u_tr, to = u_br, radius = r_slot)
+        let ub_line = line(from = u_br, to = u_bl)
+        let ul_arc = arc(from = u_bl, to = u_tl, radius = r_slot)
+        region::closed([ut_line, ur_arc, ub_line, ul_arc])
+
+        constraint::horizontal(ut_line)
+        constraint::horizontal(ub_line)
+        constraint::tangent(edge = ur_arc, target = ut_line, at = u_tr)
+        constraint::tangent(edge = ul_arc, target = ub_line, at = u_bl)
+    }
+    |> extrude(height = plate_thickness + 2.0mm)
+    |> array::linear(axis = X_AXIS, count = 2, spacing = 70.0mm)
+    |> tag::faces("adjustment_slots")
+
+    let final_part = base_plate
+        |> boolean::subtract(
+            tools = [rear_slot_pair, upper_slot_pair, center_dowel_holes],
+            preserve_exact_interfaces = true
+        )
+
+    let bottom_datum = final_part.faces().planar().filter(normal = -Z).min_by(coord = Z)
+        |> pmi::datum("A", flatness = 0.025mm)
+
+    assert::bbox(target = final_part, max_size = [145.0mm, 75.0mm, 15.0mm])
+    assert::dfm_accessible(target = final_part, axes = [+Z, -Z], min_wall_thickness = 3.0mm)
+
+    return final_part
+}

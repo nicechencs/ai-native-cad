@@ -1,0 +1,7 @@
+@unit(length = "mm", angle = "deg", force = "N")
+part InchCollarImport() -> Solid {
+    return import::step(
+        path = "assets/collar_inch.step",
+        sha256 = "daf310af0eca21781f264b98119ceae0b033024f3dc1dd6a721941bcfef5c7b7"
+    )
+}

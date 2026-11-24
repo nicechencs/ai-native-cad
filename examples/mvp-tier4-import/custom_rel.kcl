@@ -1,0 +1,7 @@
+@unit(length = "mm", angle = "deg", force = "N")
+part CustomRelationshipImport() -> Solid {
+    return import::mesh(
+        path = "assets/custom_rel.3mf",
+        sha256 = "d2fd2c7b5c199ef69dd331d539f9e1f17b27aa57d87e224b0dc09a20f4fda225"
+    )
+}

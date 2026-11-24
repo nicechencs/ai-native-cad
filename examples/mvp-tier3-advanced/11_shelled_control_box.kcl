@@ -1,0 +1,17 @@
+// Open-top control enclosure with two M4 tap-drill holes in the floor.
+@unit(length = "mm", angle = "deg", force = "N")
+@material("Al-6061-T6")
+
+part ShelledControlBox(wall: Length = 3.0mm) -> Solid {
+    let stock = box(size = [60mm, 40mm, 25mm], origin = [-30mm, -20mm, 0mm])
+    let top = stock.faces().planar().filter(normal = +Z).max_by(coord = Z)
+    let enclosure = stock |> shell(thickness = wall, open_faces = [top])
+
+    // These solid tools cut the bottom, not a modeled helical thread.
+    let tap_a = hole::tapped(spec = "M4x0.7-6H", depth = wall + 2mm, origin = [-17mm, -10mm, -1mm], axis = +Z)
+    let tap_b = hole::tapped(spec = "M4x0.7-6H", depth = wall + 2mm, origin = [-17mm, 10mm, -1mm], axis = +Z)
+    let left_hand = enclosure |> boolean::subtract(tools = [tap_a, tap_b], preserve_exact_interfaces = true)
+
+    // Export the right-hand variant without retaining the original.
+    return left_hand |> mirror(plane = YZ_PLANE, merge = false)
+}

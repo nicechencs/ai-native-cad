@@ -1,0 +1,7 @@
+@unit(length = "mm", angle = "deg", force = "N")
+part OffsetAssemblyImport() -> Solid {
+    return import::step(
+        path = "assets/two_part_offset_asm.step",
+        sha256 = "372c2141a353b53d37581f6c0292d2d21d7363d9df0a1b450d55c16f5b53c9ad"
+    )
+}

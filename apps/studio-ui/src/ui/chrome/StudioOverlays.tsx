@@ -1,4 +1,6 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
+import { createPortal } from "react-dom";
+import { handleConfirmBackdropMouseDown } from "./confirmDialogPolicy.ts";
 import { COMMAND_LINE_SUGGESTIONS } from "../../core/commands/commandLineParser.ts";
 import type { CommandDefinition } from "../../core/commands/commandRegistry.ts";
 import { NAVIGATION_PRESETS, RADIAL_MENU_SLOTS } from "../../core/viewport/navigationPreset.ts";
@@ -95,8 +97,10 @@ export function ConfirmDialog({
   readonly onConfirm: () => void;
   readonly onCancel: () => void;
 }) {
+  const openedAtRef = useRef(0);
   useEffect(() => {
     if (!open) return;
+    openedAtRef.current = typeof performance !== "undefined" ? performance.now() : Date.now();
     const handleKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") onCancel();
     };
@@ -105,15 +109,26 @@ export function ConfirmDialog({
   }, [open, onCancel]);
 
   if (!open) return null;
+  if (typeof document === "undefined") return null;
 
-  return (
+  return createPortal(
     <div
-      className="modal-backdrop"
+      className="modal-backdrop confirm-dialog-backdrop"
       role="dialog"
       aria-modal="true"
       aria-label={title}
       onMouseDown={(event) => {
-        if (event.target === event.currentTarget) onCancel();
+        const now = typeof performance !== "undefined" ? performance.now() : Date.now();
+        if (
+          handleConfirmBackdropMouseDown({
+            openedAtMs: openedAtRef.current,
+            eventTimeMs: now,
+            target: event.target,
+            currentTarget: event.currentTarget,
+          }) === "cancel"
+        ) {
+          onCancel();
+        }
       }}
     >
       <div className="confirm-dialog">
@@ -133,7 +148,8 @@ export function ConfirmDialog({
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 

@@ -1,0 +1,111 @@
+// MVP Tier 2 Golden Part 08: NEMA 17 步进电机双侧筋板安装座（31mm 标准孔距 + 22mm H7 止口孔）
+
+@unit(length = "mm", angle = "deg", force = "N")
+@material("Al-6061-T6")
+@manufacturing(method = "CNC_3AXIS_MILLING", min_tool_radius = 1.5mm)
+
+part Nema17MotorMount(
+    mount_width: Length = 54.0mm,
+    base_depth: Length = 60.0mm,
+    plate_thickness: Length = 6.0mm,
+    faceplate_height: Length = 62.0mm,
+    motor_center_z: Length = 34.0mm,
+    pilot_bore_d: Length = 22.0mm @pmi::tolerance("H7", roughness = "Ra1.6"),
+    nema17_bolt_pitch: Length = 31.0mm
+) -> Solid {
+    let half_pitch = nema17_bolt_pitch / 2.0
+
+    let faceplate = box(
+        size = [plate_thickness, mount_width, faceplate_height],
+        origin = [0.0mm, -mount_width / 2.0, 0.0mm]
+    )
+    let baseplate = box(
+        size = [base_depth, mount_width, plate_thickness],
+        origin = [0.0mm, -mount_width / 2.0, 0.0mm]
+    )
+
+    // 双侧加强筋毛坯：拉伸后切出中间 44mm 电机本体避让空间
+    let gusset_block = sketch(plane = XZ_PLANE) {
+        let g0 = point(x = plate_thickness, z = plate_thickness)
+        let g1 = point(x = 44.0mm, z = plate_thickness)
+        let g2 = point(x = plate_thickness, z = 52.0mm)
+
+        let ge0 = line(from = g0, to = g1)
+        let ge1 = line(from = g1, to = g2)
+        let ge2 = line(from = g2, to = g0)
+        region::closed([ge0, ge1, ge2])
+
+        constraint::horizontal(ge0)
+        constraint::vertical(ge2)
+    }
+    |> extrude_symmetric(thickness = mount_width)
+
+    let motor_body_clearance = box(
+        size = [46.0mm, 44.0mm, 54.0mm],
+        origin = [plate_thickness, -22.0mm, plate_thickness]
+    )
+
+    let bracket_blank = boolean::union(items = [faceplate, baseplate, gusset_block])
+
+    let pilot_bore_tool = cylinder(
+        d = pilot_bore_d,
+        h = plate_thickness + 2.0mm,
+        origin = [-1.0mm, 0.0mm, motor_center_z],
+        axis = X_AXIS,
+        exact_brep = true
+    )
+    |> tag::cylindrical_faces("nema17_pilot_bore")
+
+    let m3_bolts_lower = cylinder(
+        d = 3.4mm,
+        h = plate_thickness + 2.0mm,
+        origin = [-1.0mm, -half_pitch, motor_center_z - half_pitch],
+        axis = X_AXIS
+    )
+    |> array::linear(axis = Y_AXIS, count = 2, spacing = nema17_bolt_pitch)
+
+    let m3_bolts_upper = cylinder(
+        d = 3.4mm,
+        h = plate_thickness + 2.0mm,
+        origin = [-1.0mm, -half_pitch, motor_center_z + half_pitch],
+        axis = X_AXIS
+    )
+    |> array::linear(axis = Y_AXIS, count = 2, spacing = nema17_bolt_pitch)
+
+    let base_mount_front = hole::simple(
+        d = 5.5mm,
+        depth = plate_thickness + 2.0mm,
+        origin = [22.0mm, -15.0mm, plate_thickness + 1.0mm]
+    )
+    |> array::linear(axis = Y_AXIS, count = 2, spacing = 30.0mm)
+
+    let base_mount_rear = hole::simple(
+        d = 5.5mm,
+        depth = plate_thickness + 2.0mm,
+        origin = [48.0mm, -15.0mm, plate_thickness + 1.0mm]
+    )
+    |> array::linear(axis = Y_AXIS, count = 2, spacing = 30.0mm)
+
+    let final_part = bracket_blank
+        |> boolean::subtract(
+            tools = [
+                motor_body_clearance,
+                pilot_bore_tool,
+                m3_bolts_lower,
+                m3_bolts_upper,
+                base_mount_front,
+                base_mount_rear
+            ],
+            preserve_exact_interfaces = true
+        )
+
+    let datum_a = final_part.faces().planar().filter(normal = -Z).min_by(coord = Z)
+        |> pmi::datum("A", flatness = 0.02mm)
+    let pilot_surface = final_part.faces().tagged("nema17_pilot_bore")
+        |> pmi::perpendicularity(tol = 0.015mm, datum = "A")
+
+    assert::bbox(target = final_part, max_size = [65.0mm, 60.0mm, 68.0mm])
+    assert::dfm_accessible(target = final_part, axes = [+Z, +X, -X], min_wall_thickness = 2.5mm)
+
+    return final_part
+}

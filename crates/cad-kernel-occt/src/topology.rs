@@ -111,8 +111,12 @@ fn flag(value: i32) -> Result<bool, KernelError> {
 /// Vector indices are shape-local IDs; face indices correspond to the native
 /// mesh descriptors (`occt_face_<index>`) for the same shape.
 pub fn extract(handle: &OcctShapeGuard) -> Result<ExactTopology, KernelError> {
+    extract_from_handle(handle.raw_handle())
+}
+
+pub fn extract_from_handle(raw_handle: u64) -> Result<ExactTopology, KernelError> {
     let mut raw = RawResult::default();
-    match unsafe { occt_bridge_extract_topology(handle.raw_handle(), &mut raw) } {
+    match unsafe { occt_bridge_extract_topology(raw_handle, &mut raw) } {
         0 => (),
         -4 => return Err(KernelError::BackendUnavailable),
         status => {

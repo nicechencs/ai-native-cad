@@ -1,0 +1,11 @@
+{
+  "created_with_kernel": {
+    "kernel_id": "aicad-python-sdk",
+    "kernel_version": "0.1.0"
+  },
+  "entry_graph": "graph.ir.json",
+  "format_version": 1,
+  "ir_schema_version": 1,
+  "kcl_view": null,
+  "project_name": "FlangedCollar"
+}

@@ -1,0 +1,7 @@
+@unit(length = "mm", angle = "deg", force = "N")
+part Nema17Import() -> Solid {
+    return import::step(
+        path = "assets/nema17_mm.step",
+        sha256 = "3627a7a9af6fa13d5a20f9e69271c8843d260089052489eb3f20942dabc45e59"
+    )
+}

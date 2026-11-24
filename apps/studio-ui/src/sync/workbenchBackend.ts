@@ -17,6 +17,23 @@ import {
 } from "./cms2Decoder.ts";
 
 export { StepExportDiscardError, ThreeMfExportDiscardError };
+
+export function classifyNativeAgentError(error: unknown): { readonly error_code: string; readonly error: string } {
+  const message = error instanceof Error && error.message.trim() ? error.message : String(error);
+  const structured = message.match(/^AICAD_ERROR:([A-Za-z0-9_]+):(.*)$/s);
+  if (structured) {
+    return { error_code: structured[1], error: structured[2].trim() };
+  }
+  if (/event\.listen not allowed|allow-listen|core:event:allow-listen/i.test(message)) {
+    return {
+      error_code: "event_listen_denied",
+      error: "桌面应用未授予事件监听权限，无法订阅 AI 进度。请检查应用权限配置后重试。",
+    };
+  }
+  return { error_code: "ipc_error", error: message };
+}
+
+
 import { evaluateDemoKclModel } from "../data/demoWorkbenchState.ts";
 import { browserStepBlockedMessage, previewBrowserStep } from "../preview/stepPreview.ts";
 import type {
@@ -97,7 +114,7 @@ export interface WorkbenchBackend {
   listAssets(): Promise<readonly WorkspaceAsset[]>;
   uploadAsset(name: string, bytes: ArrayBuffer): Promise<WorkspaceAsset>;
   inspectAsset(asset: WorkspaceAsset): Promise<unknown>;
-  exportArtifact(kind: HostExportKind, document: WorkbenchDocument, model: WorkbenchModel, signal: AbortSignal): Promise<WorkbenchExport>;
+  exportArtifact(kind: HostExportKind, document: WorkbenchDocument, model: WorkbenchModel, signal: AbortSignal, options?: { allowNonAuthoritativePreview?: boolean }): Promise<WorkbenchExport>;
   getAiConfig(signal: AbortSignal): Promise<AiConfigStatus | null>;
   getAiProfiles?(signal: AbortSignal): Promise<AiProfilesResponse | null>;
   saveAiProfiles?(
@@ -109,6 +126,9 @@ export interface WorkbenchBackend {
   diffPreviewBranch?(request: PreviewBranchRequest, signal?: AbortSignal): Promise<PreviewBranchActionResult>;
   commitPreviewBranch?(request: PreviewBranchRequest, signal?: AbortSignal): Promise<PreviewBranchActionResult>;
   discardPreviewBranch?(request: PreviewBranchRequest, signal?: AbortSignal): Promise<PreviewBranchActionResult>;
+  importAicadDocument?(fileName: string, contentsBase64: string): Promise<{ projectPath: string; projectName: string; source: string; history?: { canRollback: boolean; oplogLen: number; headSeq: number | null; previousSeq: number | null } }>;
+  saveAicadDocument?(request: { projectPath: string; projectName: string; source: string }): Promise<{ projectPath: string; projectName: string; history?: { canRollback: boolean; oplogLen: number; headSeq: number | null; previousSeq: number | null } }>;
+  undoAicadContainer?(request: { projectPath: string }): Promise<{ projectPath: string; projectName: string; source: string; history: { canRollback: boolean; oplogLen: number; headSeq: number | null; previousSeq: number | null } }>;
 }
 
 export class WorkbenchUnavailableError extends Error {
@@ -376,7 +396,7 @@ function previewExport(kind: "dxf" | "drawing", { sceneMesh, diagnostics, traceI
     : downloadArtifact(kind, partName, generateFallbackDrawingSvg(sceneMesh, diagnostics.metrics, {}), "已下载预览工程图 SVG。", traceId);
 }
 
-export async function exportWorkbenchModel(backend: WorkbenchBackend, kind: ExportKind, document: WorkbenchDocument, model: WorkbenchModel, signal: AbortSignal): Promise<WorkbenchExport> {
+export async function exportWorkbenchModel(backend: WorkbenchBackend, kind: ExportKind, document: WorkbenchDocument, model: WorkbenchModel, signal: AbortSignal, options?: { allowNonAuthoritativePreview?: boolean }): Promise<WorkbenchExport> {
   signal.throwIfAborted();
   const { diagnostics, sceneMesh, origin } = model;
   if (diagnostics.status !== "ok" || model.transportError) throw new Error("请先修复编译错误。");
@@ -385,7 +405,7 @@ export async function exportWorkbenchModel(backend: WorkbenchBackend, kind: Expo
       value instanceof Float64Array || value instanceof Uint32Array ? Array.from(value) : value, 2);
     return downloadArtifact(kind, sceneMesh.part_name || "model", content, "已下载 Scene-Mesh JSON。", model.traceId);
   }
-  if (origin === "host") return backend.exportArtifact(kind, document, model, signal);
+  if (origin === "host") return backend.exportArtifact(kind, document, model, signal, options);
   if (kind === "step") throw new Error("STEP 导出需要已编译模型及支持该格式的工作台服务。");
   if (kind === "3mf") throw new Error("3MF 导出需要已编译模型及支持该格式的工作台服务。");
   return previewExport(kind, model);
@@ -921,7 +941,7 @@ export function createTauriWorkbenchBackend(
         rethrowIpc(error, traceId, "inspect-asset");
       }
     },
-    async exportArtifact(kind, document, model, signal) {
+    async exportArtifact(kind, document, model, signal, options) {
       signal.throwIfAborted();
       // The native DXF/SVG commands return output paths, not bytes. Keep the existing
       // downloadable mesh-based previews without requiring a writable install directory.
@@ -936,6 +956,7 @@ export function createTauriWorkbenchBackend(
                 ...nativeCompileRequest(document, traceId),
                 out_path: `out/${safePart}.step`,
                 include_pmi: true,
+                allow_non_authoritative_preview: options?.allowNonAuthoritativePreview,
               },
               signal,
             )
@@ -1066,13 +1087,13 @@ export function createTauriWorkbenchBackend(
                 onAbort();
                 return;
               }
-              const message = error instanceof Error && error.message.trim() ? error.message : String(error);
+              const classified = classifyNativeAgentError(error);
               enqueueEvent("error", {
                 ok: false,
                 status: 500,
                 trace_id: traceId,
-                error: message,
-                error_code: "ipc_error",
+                error: classified.error,
+                error_code: classified.error_code,
               });
               closeStream();
             })
@@ -1192,6 +1213,71 @@ export function createTauriWorkbenchBackend(
       } catch (error) {
         signal?.throwIfAborted();
         rethrowIpc(error, traceId, "preview-discard");
+      }
+    },
+    async importAicadDocument(fileName, contentsBase64) {
+      const traceId = createTraceId();
+      try {
+        const opened = await ipc.importAicadDocument({
+          file_name: fileName,
+          contents_base64: contentsBase64,
+        });
+        return {
+          projectPath: opened.project_path,
+          projectName: opened.project_name,
+          source: opened.source,
+          history: {
+            canRollback: opened.history?.can_rollback === true,
+            oplogLen: opened.history?.oplog_len ?? 0,
+            headSeq: opened.history?.head_seq ?? null,
+            previousSeq: opened.history?.previous_seq ?? null,
+          },
+        };
+      } catch (error) {
+        rethrowIpc(error, traceId, "import-aicad");
+      }
+    },
+    async saveAicadDocument(request) {
+      const traceId = createTraceId();
+      try {
+        const saved = await ipc.saveAicadDocument({
+          project_path: request.projectPath,
+          project_name: request.projectName,
+          source: request.source,
+        });
+        return {
+          projectPath: saved.project_path,
+          projectName: saved.project_name,
+          history: {
+            canRollback: saved.history?.can_rollback === true,
+            oplogLen: saved.history?.oplog_len ?? 0,
+            headSeq: saved.history?.head_seq ?? null,
+            previousSeq: saved.history?.previous_seq ?? null,
+          },
+        };
+      } catch (error) {
+        rethrowIpc(error, traceId, "save-aicad");
+      }
+    },
+    async undoAicadContainer(request) {
+      const traceId = createTraceId();
+      try {
+        const undone = await ipc.undoAicadContainer({
+          project_path: request.projectPath,
+        });
+        return {
+          projectPath: undone.project_path,
+          projectName: undone.project_name,
+          source: undone.source,
+          history: {
+            canRollback: undone.history?.can_rollback === true,
+            oplogLen: undone.history?.oplog_len ?? 0,
+            headSeq: undone.history?.head_seq ?? null,
+            previousSeq: undone.history?.previous_seq ?? null,
+          },
+        };
+      } catch (error) {
+        rethrowIpc(error, traceId, "undo-aicad-container");
       }
     },
   };

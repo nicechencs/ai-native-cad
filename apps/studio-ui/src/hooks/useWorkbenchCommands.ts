@@ -25,6 +25,7 @@ type CommandDocument = Pick<ReturnType<typeof useWorkbenchDocument>,
   "sourceFileInput" | "handleDownloadSource" | "model" | "isAssembly" | "canExport" | "exporting"
   | "aiGenerating" | "canUndo" | "canRedo" | "handleUndo" | "handleRedo" | "handleExportCommand"
   | "handleApplyQuickFeature" | "handleCancelAi" | "handleAiGenerate"
+  | "aicadFileInput" | "handleSaveAicadProject"
 >;
 
 type CommandViewport = Pick<ReturnType<typeof useWorkbenchViewport>,
@@ -199,6 +200,22 @@ export function useWorkbenchCommands({
         shortcut: "Ctrl+S",
         scope: "global",
         execute: handleDownloadSource,
+      },
+      {
+        id: "file.openAicad",
+        title: "打开 .aicad 工程…",
+        category: "文件",
+        keywords: ["open", "aicad", "工程", "project"],
+        icon: "code",
+        execute: () => documentState.aicadFileInput?.current?.click(),
+      },
+      {
+        id: "file.saveAicad",
+        title: "保存 .aicad 工程",
+        category: "文件",
+        keywords: ["save", "aicad", "工程", "project"],
+        icon: "export",
+        execute: () => { void documentState.handleSaveAicadProject?.(); },
       },
       {
         id: "file.importAsset",

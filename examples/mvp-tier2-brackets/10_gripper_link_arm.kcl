@@ -1,0 +1,89 @@
+// MVP Tier 2 Golden Part 10: 机器人夹爪高精度连杆臂（变径双凸台 + 梯形闭合臂身 + 减重型腔 + 双 H7 铰接孔）
+
+@unit(length = "mm", angle = "deg", force = "N")
+@material("Al-7075-T6")
+@manufacturing(method = "CNC_3AXIS_MILLING", min_tool_radius = 1.5mm)
+
+part GripperLinkArm(
+    center_distance: Length = 85.0mm,
+    arm_thickness: Length = 10.0mm,
+    proximal_boss_d: Length = 32.0mm,
+    distal_boss_d: Length = 26.0mm,
+    proximal_bore_d: Length = 14.0mm @pmi::tolerance("H7", roughness = "Ra0.8"),
+    distal_bore_d: Length = 10.0mm @pmi::tolerance("H7", roughness = "Ra0.8")
+) -> Solid {
+    let prox_web_half = proximal_boss_d / 2.0 - 2.0mm
+    let dist_web_half = distal_boss_d / 2.0 - 2.0mm
+
+    let prox_boss = cylinder(
+        d = proximal_boss_d,
+        h = arm_thickness,
+        origin = [0.0mm, 0.0mm, 0.0mm]
+    )
+    let dist_boss = cylinder(
+        d = distal_boss_d,
+        h = arm_thickness,
+        origin = [center_distance, 0.0mm, 0.0mm]
+    )
+
+    // 闭合等腰梯形连杆腹板草图（两端略嵌入凸台内，保证精确 B-Rep 并集鲁棒性）
+    let link_web = sketch(plane = XY_PLANE) {
+        let p_tl = point(x = 0.0mm, y = prox_web_half)
+        let p_tr = point(x = center_distance, y = dist_web_half)
+        let p_br = point(x = center_distance, y = -dist_web_half)
+        let p_bl = point(x = 0.0mm, y = -prox_web_half)
+
+        let top_edge = line(from = p_tl, to = p_tr)
+        let right_edge = line(from = p_tr, to = p_br)
+        let bot_edge = line(from = p_br, to = p_bl)
+        let left_edge = line(from = p_bl, to = p_tl)
+        region::closed([top_edge, right_edge, bot_edge, left_edge])
+
+        constraint::vertical(right_edge)
+        constraint::vertical(left_edge)
+    }
+    |> extrude(height = arm_thickness)
+
+    let arm_blank = boolean::union(items = [prox_boss, dist_boss, link_web])
+
+    // 中央轻量化减重型腔（保留 4mm 底板与 >6.8mm 侧壁）
+    let weight_pocket = box(
+        size = [34.0mm, 10.0mm, 6.5mm],
+        origin = [26.0mm, -5.0mm, 4.0mm]
+    )
+    |> fillet(r = 2.0mm)
+
+    let prox_bore_tool = cylinder(
+        d = proximal_bore_d,
+        h = arm_thickness + 2.0mm,
+        origin = [0.0mm, 0.0mm, -1.0mm],
+        exact_brep = true
+    )
+    |> tag::cylindrical_faces("proximal_pivot_bore")
+
+    let dist_bore_tool = cylinder(
+        d = distal_bore_d,
+        h = arm_thickness + 2.0mm,
+        origin = [center_distance, 0.0mm, -1.0mm],
+        exact_brep = true
+    )
+    |> tag::cylindrical_faces("distal_pivot_bore")
+
+    let final_part = arm_blank
+        |> boolean::subtract(
+            tools = [prox_bore_tool, dist_bore_tool, weight_pocket],
+            preserve_exact_interfaces = true
+        )
+
+    let datum_a = final_part.faces().planar().filter(normal = -Z).min_by(coord = Z)
+        |> pmi::datum("A", flatness = 0.015mm)
+    let prox_surface = final_part.faces().tagged("proximal_pivot_bore")
+        |> pmi::perpendicularity(tol = 0.01mm, datum = "A")
+    let dist_surface = final_part.faces().tagged("distal_pivot_bore")
+        |> pmi::perpendicularity(tol = 0.01mm, datum = "A")
+
+    assert::bbox(target = final_part, max_size = [120.0mm, 36.0mm, 14.0mm])
+    assert::dfm_accessible(target = final_part, axes = [+Z, -Z], min_wall_thickness = 3.0mm)
+
+    return final_part
+}

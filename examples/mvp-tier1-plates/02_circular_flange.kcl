@@ -1,0 +1,78 @@
+// MVP Tier 1 Golden Part 02: 阶梯式圆形安装法兰（XZ 闭合旋转草图 + H7 通孔 + 6x M6 圆周螺栓阵列）
+
+@unit(length = "mm", angle = "deg", force = "N")
+@material("SUS304")
+@manufacturing(method = "CNC_TURNING", min_tool_radius = 1.0mm)
+
+part CircularFlange(
+    flange_od: Length = 100.0mm,
+    hub_od: Length = 52.0mm,
+    bore_d: Length = 25.0mm @pmi::tolerance("H7", roughness = "Ra0.8"),
+    flange_thickness: Length = 10.0mm,
+    total_height: Length = 24.0mm,
+    bolt_pcd: Length = 76.0mm,
+    bolt_count: u32 = 6
+) -> Solid {
+    let flange_r = flange_od / 2.0
+    let hub_r = hub_od / 2.0
+    let bolt_radius = bolt_pcd / 2.0
+
+    // 闭合半剖旋转草图（XZ 平面绕 Z 轴旋转 360deg）
+    let flange_body = sketch(plane = XZ_PLANE) {
+        let p0 = point(x = 0.0mm, z = 0.0mm)
+        let p1 = point(x = flange_r, z = 0.0mm)
+        let p2 = point(x = flange_r, z = flange_thickness)
+        let p3 = point(x = hub_r, z = flange_thickness)
+        let p4 = point(x = hub_r, z = total_height)
+        let p5 = point(x = 0.0mm, z = total_height)
+
+        let e0 = line(from = p0, to = p1)
+        let e1 = line(from = p1, to = p2)
+        let e2 = line(from = p2, to = p3)
+        let e3 = line(from = p3, to = p4)
+        let e4 = line(from = p4, to = p5)
+        let e5 = line(from = p5, to = p0)
+        region::closed([e0, e1, e2, e3, e4, e5])
+
+        constraint::horizontal(e0)
+        constraint::vertical(e1)
+        constraint::horizontal(e2)
+        constraint::vertical(e3)
+        constraint::horizontal(e4)
+        constraint::vertical(e5)
+    }
+    |> revolve(axis = Z_AXIS, angle = 360.0deg)
+    |> chamfer(d = 0.8mm)
+
+    let shaft_bore_tool = cylinder(
+        d = bore_d,
+        h = total_height + 2.0mm,
+        origin = [0.0mm, 0.0mm, -1.0mm],
+        exact_brep = true
+    )
+    |> tag::cylindrical_faces("shaft_bore")
+
+    let bolt_circle_holes = hole::simple(
+        d = 6.6mm,
+        depth = flange_thickness + 2.0mm,
+        origin = [bolt_radius, 0.0mm, flange_thickness + 1.0mm]
+    )
+    |> array::polar(axis = Z_AXIS, radius = bolt_radius, count = bolt_count, start_angle = 0.0deg)
+    |> tag::faces("flange_bolt_holes")
+
+    let final_part = flange_body
+        |> boolean::subtract(
+            tools = [shaft_bore_tool, bolt_circle_holes],
+            preserve_exact_interfaces = true
+        )
+
+    let bottom_datum = final_part.faces().planar().filter(normal = -Z).min_by(coord = Z)
+        |> pmi::datum("A", flatness = 0.015mm)
+    let bore_surface = final_part.faces().tagged("shaft_bore")
+        |> pmi::perpendicularity(tol = 0.012mm, datum = "A")
+
+    assert::bbox(target = final_part, max_size = [105.0mm, 105.0mm, 28.0mm])
+    assert::dfm_accessible(target = final_part, axes = [+Z, -Z], min_wall_thickness = 3.0mm)
+
+    return final_part
+}

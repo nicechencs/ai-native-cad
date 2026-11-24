@@ -196,6 +196,8 @@ export interface GeometryMetrics {
   readonly open_edge_count?: number;
   readonly compile_time_ms?: number;
   readonly kernel_backend?: string;
+  readonly kernel_authoritative?: boolean;
+  readonly kernel_fallback_reason?: string;
 }
 
 export interface DiagnosticsReport {

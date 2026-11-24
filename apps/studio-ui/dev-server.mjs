@@ -30,6 +30,7 @@ import {
   saveAiProfileStore,
   testAiProfileConnection,
 } from "./ai-profile-store.mjs";
+import { envForCadCli, isCadCliBinary } from "./src/sync/cadCliSpawnEnv.mjs";
 
 const execFileAsyncBase = promisify(execFile);
 
@@ -42,11 +43,12 @@ function newTraceId() {
 function currentTraceId() {
   return traceStore.getStore()?.traceId ?? process.env.AICAD_TRACE_ID ?? newTraceId();
 }
-function withTraceEnv(env) {
-  return { ...(env ?? process.env), AICAD_TRACE_ID: currentTraceId() };
+function withTraceEnv(env, file) {
+  const traced = { ...(env ?? process.env), AICAD_TRACE_ID: currentTraceId() };
+  return isCadCliBinary(file) ? envForCadCli(traced, file) : traced;
 }
 function execFileAsync(file, args, options = {}) {
-  return execFileAsyncBase(file, args, { ...options, env: withTraceEnv(options.env) });
+  return execFileAsyncBase(file, args, { ...options, env: withTraceEnv(options.env, file) });
 }
 
 const __filename = fileURLToPath(import.meta.url);
@@ -1220,7 +1222,7 @@ async function runMcpToolCalls({ workspaceRoot, projectPath, calls, cliBin = nul
 
   const { stdout, stderr, exitCode } = await new Promise((resolve, reject) => {
     const child = spawn(resolvedCli, args, {
-      env: withTraceEnv(process.env),
+      env: withTraceEnv(process.env, resolvedCli),
       cwd: REPO_ROOT,
       stdio: ["pipe", "pipe", "pipe"],
     });

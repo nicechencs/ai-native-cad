@@ -965,8 +965,7 @@ fn vertices_and_faces(
         return Err(failure("non-finite tessellation coordinate"));
     }
     let mut faces = Vec::new();
-    let mut edge_segments = BTreeSet::new();
-    let mut edges = Vec::new();
+    let mut mesh_segments = Vec::new();
     let mut next_vert = 0;
     let mut next_index = 0;
     let mut face_indexes = BTreeSet::new();
@@ -1002,21 +1001,11 @@ fn vertices_and_faces(
             return Err(failure("face-local triangle index out of range"));
         }
         let (outer_loop, inner_loops) = face_boundaries(vertices, face_indices, |p, q| {
-            // No native curve extraction in Phase A. Preview only the per-face mesh
-            // boundary, not triangulation diagonals. Seams/singularities may differ
-            // from the exact native edge count returned in CheckReport.
-            let key = |p: [f64; 3]| p.map(|x| (x * 1e7).round() as i64);
-            let mut segment = [key(p), key(q)];
-            segment.sort_unstable();
-            if segment[0] != segment[1] && edge_segments.insert(segment) {
-                edges.push(BRepEdge {
-                    edge_id: format!("occt_edge_{}", edges.len()),
-                    curve_type: CurveType::Polyline,
-                    polyline: p.into_iter().chain(q).collect(),
-                    provenance_tags: Vec::new(),
-                    component_id: None,
-                    ast_span: span,
-                });
+            // Collect unique mesh-boundary segments; they are later grouped onto
+            // exact native B-Rep edges so a hole rim stays one Circle, not dozens
+            // of Other polylines (TES-1-C3).
+            if p != q {
+                mesh_segments.push((p, q));
             }
         });
         let surface_type = match desc.surface_kind {
@@ -1051,7 +1040,282 @@ fn vertices_and_faces(
     if next_vert != positions.len() || next_index != indices.len() {
         return Err(failure("incomplete tessellation ranges"));
     }
+    let edges = preview_edges_from_native_topology(id, &faces, &mesh_segments, span)?;
     Ok((faces, edges))
+}
+
+fn curve_type_from_native(kind: crate::topology::CurveKind) -> CurveType {
+    match kind {
+        crate::topology::CurveKind::Line => CurveType::Line,
+        crate::topology::CurveKind::Circle => CurveType::Circle,
+        crate::topology::CurveKind::Ellipse => CurveType::Ellipse,
+        crate::topology::CurveKind::BSpline => CurveType::Bspline,
+        crate::topology::CurveKind::Other => CurveType::Polyline,
+    }
+}
+
+fn quantize_point(p: [f64; 3]) -> [i64; 3] {
+    p.map(|x| (x * 1e7).round() as i64)
+}
+
+fn point_on_face(face: &BRepFace, p: [f64; 3]) -> bool {
+    const TOL_SQ: f64 = 1e-8;
+    face.vertices.chunks_exact(3).any(|chunk| {
+        let d0 = chunk[0] - p[0];
+        let d1 = chunk[1] - p[1];
+        let d2 = chunk[2] - p[2];
+        d0 * d0 + d1 * d1 + d2 * d2 <= TOL_SQ
+    })
+}
+
+fn face_index_of(face: &BRepFace) -> Option<u32> {
+    face.face_id
+        .strip_prefix("occt_face_")
+        .and_then(|s| s.parse().ok())
+}
+
+fn face_bbox_expanded(face: &BRepFace, tol: f64) -> Option<BBox3> {
+    let mut min = [f64::INFINITY; 3];
+    let mut max = [f64::NEG_INFINITY; 3];
+    let mut any = false;
+    for chunk in face.vertices.chunks_exact(3) {
+        any = true;
+        for axis in 0..3 {
+            min[axis] = min[axis].min(chunk[axis]);
+            max[axis] = max[axis].max(chunk[axis]);
+        }
+    }
+    any.then(|| BBox3 {
+        min: [min[0] - tol, min[1] - tol, min[2] - tol],
+        max: [max[0] + tol, max[1] + tol, max[2] + tol],
+    })
+}
+
+fn bbox_contains_point(bbox: &BBox3, p: [f64; 3]) -> bool {
+    (0..3).all(|axis| p[axis] >= bbox.min[axis] && p[axis] <= bbox.max[axis])
+}
+
+fn incident_face_indices(
+    face_entries: &[(u32, BBox3, &BRepFace)],
+    p: [f64; 3],
+    q: [f64; 3],
+) -> BTreeSet<u32> {
+    let mut out = BTreeSet::new();
+    for &(idx, bbox, face) in face_entries {
+        if bbox_contains_point(&bbox, p)
+            && bbox_contains_point(&bbox, q)
+            && point_on_face(face, p)
+            && point_on_face(face, q)
+        {
+            out.insert(idx);
+        }
+    }
+    out
+}
+
+fn chain_segment_polylines(segments: &[([f64; 3], [f64; 3])]) -> Vec<Vec<f64>> {
+    if segments.is_empty() {
+        return Vec::new();
+    }
+    let mut adjacency: BTreeMap<[i64; 3], Vec<(usize, bool)>> = BTreeMap::new();
+    for (i, (a, b)) in segments.iter().enumerate() {
+        adjacency.entry(quantize_point(*a)).or_default().push((i, false));
+        adjacency.entry(quantize_point(*b)).or_default().push((i, true));
+    }
+    let mut used = vec![false; segments.len()];
+    let mut chains = Vec::new();
+
+    loop {
+        // Prefer open endpoints (degree == 1 among unused segments) so open edges
+        // trace end-to-end rather than splitting in the middle; otherwise pick
+        // the first remaining vertex to trace a closed loop.
+        let mut open_start = None;
+        let mut fallback_start = None;
+        for (key, entries) in &adjacency {
+            let remaining = entries.iter().filter(|(idx, _)| !used[*idx]).count();
+            if remaining == 1 {
+                open_start = Some(*key);
+                break;
+            }
+            if remaining > 0 && fallback_start.is_none() {
+                fallback_start = Some(*key);
+            }
+        }
+        let Some(start_key) = open_start.or(fallback_start) else {
+            break;
+        };
+
+        let mut points = Vec::new();
+        let mut key = start_key;
+        let Some((first, reversed)) = adjacency
+            .get(&key)
+            .and_then(|v| v.iter().copied().find(|(i, _)| !used[*i]))
+        else {
+            break;
+        };
+        used[first] = true;
+        let (a, b) = segments[first];
+        let (start, end) = if reversed { (b, a) } else { (a, b) };
+        points.extend(start);
+        points.extend(end);
+        key = quantize_point(end);
+
+        if key != start_key {
+            loop {
+                let Some(candidates) = adjacency.get(&key) else {
+                    break;
+                };
+                let Some((idx, reversed)) =
+                    candidates.iter().copied().find(|(i, _)| !used[*i])
+                else {
+                    break;
+                };
+                used[idx] = true;
+                let (a, b) = segments[idx];
+                let end = if reversed { a } else { b };
+                points.extend(end);
+                key = quantize_point(end);
+                if points.len() >= 6 && key == start_key {
+                    break;
+                }
+            }
+        }
+        if points.len() >= 6 {
+            chains.push(points);
+        }
+    }
+    chains
+}
+
+fn preview_edges_from_native_topology(
+    id: &ShapeId,
+    faces: &[BRepFace],
+    mesh_segments: &[([f64; 3], [f64; 3])],
+    span: Span,
+) -> Result<Vec<BRepEdge>, KernelError> {
+    const FACE_TOL: f64 = 1e-4;
+    let topo = crate::topology::extract_from_handle(id.raw())?;
+    let face_entries: Vec<(u32, BBox3, &BRepFace)> = faces
+        .iter()
+        .filter_map(|face| {
+            let idx = face_index_of(face)?;
+            let bbox = face_bbox_expanded(face, FACE_TOL)?;
+            Some((idx, bbox, face))
+        })
+        .collect();
+
+    let native_meta: Vec<(usize, crate::topology::CurveKind, BTreeSet<u32>, BTreeSet<u32>)> = topo
+        .edges
+        .iter()
+        .enumerate()
+        .filter(|(_, edge)| !edge.is_degenerate)
+        .map(|(native_idx, edge)| {
+            let face_set: BTreeSet<u32> = edge
+                .face_uses
+                .iter()
+                .filter(|u| !u.is_seam)
+                .map(|u| u.face_index)
+                .collect();
+            let all_faces: BTreeSet<u32> = edge.face_uses.iter().map(|u| u.face_index).collect();
+            (native_idx, edge.curve_kind, face_set, all_faces)
+        })
+        .collect();
+
+    let mut unique = BTreeSet::new();
+    let mut buckets: BTreeMap<Vec<usize>, Vec<([f64; 3], [f64; 3])>> = BTreeMap::new();
+    for &(p, q) in mesh_segments {
+        let mut key = [quantize_point(p), quantize_point(q)];
+        key.sort_unstable();
+        if key[0] == key[1] || !unique.insert(key) {
+            continue;
+        }
+        let incident = incident_face_indices(&face_entries, p, q);
+        if incident.is_empty() {
+            continue;
+        }
+        let matching: Vec<usize> = native_meta
+            .iter()
+            .filter_map(|(native_idx, _, face_set, all_faces)| {
+                let hits = if !face_set.is_empty()
+                    && incident.is_subset(face_set)
+                    && incident.len() >= face_set.len().min(2)
+                {
+                    true
+                } else {
+                    !all_faces.is_empty() && incident == *all_faces
+                };
+                hits.then_some(*native_idx)
+            })
+            .collect();
+        if !matching.is_empty() {
+            buckets.entry(matching).or_default().push((p, q));
+        }
+    }
+
+    let mut keyed_edges: Vec<((usize, usize), BRepEdge)> = Vec::new();
+    for (matching, segs) in buckets {
+        let polylines = chain_segment_polylines(&segs);
+        for (chain_idx, polyline) in polylines.into_iter().enumerate() {
+            let native_idx = matching
+                .get(chain_idx)
+                .copied()
+                .unwrap_or(matching[0]);
+            let curve_kind = topo.edges[native_idx].curve_kind;
+            let edge_id = if chain_idx < matching.len() {
+                format!("occt_edge_{native_idx}")
+            } else {
+                format!("occt_edge_{native_idx}_{chain_idx}")
+            };
+            keyed_edges.push((
+                (native_idx, chain_idx),
+                BRepEdge {
+                    edge_id,
+                    curve_type: curve_type_from_native(curve_kind),
+                    polyline,
+                    provenance_tags: Vec::new(),
+                    component_id: None,
+                    ast_span: span,
+                },
+            ));
+        }
+    }
+    keyed_edges.sort_by_key(|(sort_key, _)| *sort_key);
+    let edges: Vec<BRepEdge> = keyed_edges.into_iter().map(|(_, edge)| edge).collect();
+    if edges.is_empty() {
+        // Do not fail solid construction if grouping cannot publish edges.
+        // The pre-fix preview (each mesh chord as an Other polyline) stays as
+        // a last-resort fallback so open/evaluate of valid solids still works.
+        return Ok(preview_edges_from_mesh_chords(mesh_segments, span));
+    }
+    Ok(edges)
+}
+
+fn preview_edges_from_mesh_chords(
+    mesh_segments: &[([f64; 3], [f64; 3])],
+    span: Span,
+) -> Vec<BRepEdge> {
+    let mut unique = BTreeSet::new();
+    let mut edges = Vec::new();
+    for &(p, q) in mesh_segments {
+        let mut key = [quantize_point(p), quantize_point(q)];
+        key.sort_unstable();
+        if key[0] == key[1] || !unique.insert(key) {
+            continue;
+        }
+        let mut polyline = Vec::with_capacity(6);
+        polyline.extend(p);
+        polyline.extend(q);
+        let idx = edges.len();
+        edges.push(BRepEdge {
+            edge_id: format!("occt_edge_{idx}"),
+            curve_type: CurveType::Polyline,
+            polyline,
+            provenance_tags: Vec::new(),
+            component_id: None,
+            ast_span: span,
+        });
+    }
+    edges
 }
 
 fn vertex(vertices: &[f64], index: u32) -> [f64; 3] {

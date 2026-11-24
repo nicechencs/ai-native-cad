@@ -1,0 +1,18 @@
+// Manifold routing study: a lofted inlet transition and a swept runner.
+// This golden exercises closed outer envelopes, not a connected fluid bore.
+@unit(length = "mm", angle = "deg", force = "N")
+@material("Al-6061-T6")
+
+part SweptManifoldPipe(inlet_d: Length = 28.0mm, runner_d: Length = 12.0mm) -> Solid {
+    let inlet = sketch(plane = XY_PLANE) {
+        let section = circle(center = [0mm, 0mm], d = inlet_d)
+        region::closed([section])
+    }
+    let neck = sketch(plane = XY_PLANE) {
+        let section = circle(center = [0mm, 0mm], d = runner_d)
+        region::closed([section])
+    }
+    let transition = loft(sections = [inlet, neck], height = 20mm)
+    let runner = sweep(profile = neck, path = [[0mm, 0mm, 20mm], [0mm, 0mm, 38mm], [20mm, 0mm, 52mm]])
+    return boolean::union(items = [transition, runner])
+}

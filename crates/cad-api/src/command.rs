@@ -420,8 +420,13 @@ pub struct BooleanSolids {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_id: Option<NodeId>,
     pub name: String,
+    // Aliases catch common LLM/schema guesses from TES-1-P1-C4 without
+    // loosening deny_unknown_fields for unrelated keys.
+    #[serde(alias = "operation")]
     pub op: BooleanOpKind,
+    #[serde(alias = "base")]
     pub target: NodeId,
+    #[serde(alias = "solids")]
     pub tools: Vec<NodeId>,
 }
 

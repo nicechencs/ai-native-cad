@@ -1,0 +1,240 @@
+{
+  "project_name": "MountingPlate",
+  "graph_id": "mounting-plate",
+  "commands": [
+    {
+      "command": "set_design_contract",
+      "args": {
+        "contract": {
+          "part_name": "MountingPlate",
+          "summary": "Parametric aluminum mounting plate with center pilot bore and 4 M6 ISO 4762 counterbored corner holes",
+          "material": "Al-6061-T6",
+          "manufacturing_method": "CNC_3AXIS_MILLING"
+        }
+      }
+    },
+    {
+      "command": "upsert_parameter",
+      "args": {
+        "name": "plate_width",
+        "ir_type": "length",
+        "value": {
+          "type": "quantity",
+          "value": {
+            "dimension": "length",
+            "value": 120.0,
+            "unit": "mm"
+          }
+        }
+      }
+    },
+    {
+      "command": "upsert_parameter",
+      "args": {
+        "name": "plate_depth",
+        "ir_type": "length",
+        "value": {
+          "type": "quantity",
+          "value": {
+            "dimension": "length",
+            "value": 80.0,
+            "unit": "mm"
+          }
+        }
+      }
+    },
+    {
+      "command": "upsert_parameter",
+      "args": {
+        "name": "plate_thickness",
+        "ir_type": "length",
+        "value": {
+          "type": "quantity",
+          "value": {
+            "dimension": "length",
+            "value": 12.0,
+            "unit": "mm"
+          }
+        }
+      }
+    },
+    {
+      "command": "upsert_parameter",
+      "args": {
+        "name": "center_bore_d",
+        "ir_type": "length",
+        "value": {
+          "type": "quantity",
+          "value": {
+            "dimension": "length",
+            "value": 28.0,
+            "unit": "mm"
+          }
+        }
+      }
+    },
+    {
+      "command": "create_primitive_box",
+      "args": {
+        "node_id": "base_plate",
+        "name": "BasePlate",
+        "width": {
+          "source": "param",
+          "param_id": "plate_width"
+        },
+        "depth": {
+          "source": "param",
+          "param_id": "plate_depth"
+        },
+        "height": {
+          "source": "param",
+          "param_id": "plate_thickness"
+        },
+        "origin_mm": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "command": "create_hole",
+      "args": {
+        "node_id": "center_bore",
+        "name": "CenterPilotBore",
+        "solid": "base_plate",
+        "origin_mm": [
+          60.0,
+          40.0,
+          12.0
+        ],
+        "axis": [
+          0.0,
+          0.0,
+          -1.0
+        ],
+        "definition": {
+          "hole": "generic",
+          "diameter": {
+            "source": "param",
+            "param_id": "center_bore_d"
+          },
+          "depth": {
+            "kind": "through_all"
+          },
+          "profile": {
+            "kind": "simple"
+          }
+        }
+      }
+    },
+    {
+      "command": "create_hole",
+      "args": {
+        "node_id": "hole_fl",
+        "name": "MountHoleFL",
+        "solid": "center_bore",
+        "origin_mm": [
+          15.0,
+          15.0,
+          12.0
+        ],
+        "axis": [
+          0.0,
+          0.0,
+          -1.0
+        ],
+        "definition": {
+          "hole": "standard",
+          "standard": "iso4762_counterbore",
+          "designation": "M6",
+          "clearance_class": "normal",
+          "depth": {
+            "kind": "through_all"
+          }
+        }
+      }
+    },
+    {
+      "command": "create_hole",
+      "args": {
+        "node_id": "hole_fr",
+        "name": "MountHoleFR",
+        "solid": "hole_fl",
+        "origin_mm": [
+          105.0,
+          15.0,
+          12.0
+        ],
+        "axis": [
+          0.0,
+          0.0,
+          -1.0
+        ],
+        "definition": {
+          "hole": "standard",
+          "standard": "iso4762_counterbore",
+          "designation": "M6",
+          "clearance_class": "normal",
+          "depth": {
+            "kind": "through_all"
+          }
+        }
+      }
+    },
+    {
+      "command": "create_hole",
+      "args": {
+        "node_id": "hole_rl",
+        "name": "MountHoleRL",
+        "solid": "hole_fr",
+        "origin_mm": [
+          15.0,
+          65.0,
+          12.0
+        ],
+        "axis": [
+          0.0,
+          0.0,
+          -1.0
+        ],
+        "definition": {
+          "hole": "standard",
+          "standard": "iso4762_counterbore",
+          "designation": "M6",
+          "clearance_class": "normal",
+          "depth": {
+            "kind": "through_all"
+          }
+        }
+      }
+    },
+    {
+      "command": "create_hole",
+      "args": {
+        "node_id": "hole_rr",
+        "name": "MountHoleRR",
+        "solid": "hole_rl",
+        "origin_mm": [
+          105.0,
+          65.0,
+          12.0
+        ],
+        "axis": [
+          0.0,
+          0.0,
+          -1.0
+        ],
+        "definition": {
+          "hole": "standard",
+          "standard": "iso4762_counterbore",
+          "designation": "M6",
+          "clearance_class": "normal",
+          "depth": {
+            "kind": "through_all"
+          }
+        }
+      }
+    }
+  ]
+}

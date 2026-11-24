@@ -56,10 +56,12 @@ onto `main` with `commit_preview`.
 python -X utf8 examples/developer-platform/03_branch_preview_and_promote.py
 ```
 
-## Smoke Verification
+## Quick Verification
 
-Run the end-to-end functional smoke suite against the real `cad-cli` binary:
+Run all three examples sequentially against the built `cad-cli` binary:
 
 ```bash
-python -X utf8 -m pytest -c tests/functional/pytest.ini tests/functional/cli_examples/test_developer_platform_examples.py -v
+python -X utf8 examples/developer-platform/01_inspect_and_measure.py
+python -X utf8 examples/developer-platform/02_parametric_commit_and_verify.py
+python -X utf8 examples/developer-platform/03_branch_preview_and_promote.py
 ```

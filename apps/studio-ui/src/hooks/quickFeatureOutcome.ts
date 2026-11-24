@@ -24,10 +24,14 @@ export function geometryAvailabilityBadge(input: {
   readonly faceCount: number;
   readonly diagnosticsStatus: "ok" | "error";
   readonly watertight: boolean;
+  readonly kernelAuthoritative?: boolean;
 }): string {
   if (input.pending) return "正在编译";
   if (input.faceCount <= 0) return "暂无可用模型";
   if (input.diagnosticsStatus === "error") return "特征未生效";
+  if (input.kernelAuthoritative === false) {
+    return input.watertight ? "网格闭合（预览）" : "预览网格未闭合";
+  }
   return input.watertight ? "L0 水密流形" : "未通过水密检查";
 }
 

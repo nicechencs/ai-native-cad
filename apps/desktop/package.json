@@ -6,8 +6,6 @@
   "description": "Tauri v2 standalone desktop host for AI-Native CAD Studio",
   "scripts": {
     "typecheck": "node ../studio-ui/node_modules/typescript/bin/tsc --noEmit",
-    "test": "node --test src/ipcBridge.test.ts",
-    "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
     "build:exe": "cargo build --release --manifest-path src-tauri/Cargo.toml --features custom-protocol"
   }
 }

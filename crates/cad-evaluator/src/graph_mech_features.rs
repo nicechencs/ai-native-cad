@@ -856,7 +856,21 @@ fn apply_dressup(
     result: Result<SolidShape, KernelOperationError>,
 ) -> Result<SolidShape, FeatureError> {
     let error = match result {
-        Ok(solid) => return Ok(solid),
+        Ok(solid) => {
+            if dressup_did_not_modify(shape, &solid) {
+                let mut feature = FeatureError::from(format!(
+                    "{parameter} {requested} mm did not modify geometry (volume and topology unchanged)"
+                ));
+                feature.detail = Some(NodeErrorDetail {
+                    code: code.to_owned(),
+                    operation: Some(parameter.to_owned()),
+                    native_status: None,
+                    message: feature.reason.clone(),
+                });
+                return Err(feature);
+            }
+            return Ok(solid);
+        }
         Err(error) => error,
     };
     let mut feature = FeatureError::from(error);
@@ -877,6 +891,13 @@ fn apply_dressup(
         });
     }
     Err(feature)
+}
+
+fn dressup_did_not_modify(before: &SolidShape, after: &SolidShape) -> bool {
+    let volume_delta = (after.csg.compute_volume() - before.csg.compute_volume()).abs();
+    volume_delta < 0.001
+        && after.faces.len() == before.faces.len()
+        && after.edges.len() == before.edges.len()
 }
 
 fn dressup_limit(shape: &SolidShape, parameter: &str) -> Option<f64> {

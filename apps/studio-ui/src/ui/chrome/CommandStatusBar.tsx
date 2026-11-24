@@ -23,6 +23,10 @@ export interface CommandStatusBarProps {
   readonly unreadNotifications: number;
   readonly onToggleNotifications: () => void;
   readonly units: string;
+  readonly onOpenDiagnostics?: () => void;
+  readonly kernelAuthoritative?: boolean;
+  readonly kernelBackend?: string;
+  readonly kernelFallbackReason?: string;
   readonly navigationPreset: NavigationPresetId;
   readonly onChangeNavigationPreset: (preset: NavigationPresetId) => void;
   readonly onRegenerate?: () => void;
@@ -43,6 +47,10 @@ export function CommandStatusBar({
   unreadNotifications,
   onToggleNotifications,
   units,
+  onOpenDiagnostics,
+  kernelAuthoritative,
+  kernelBackend,
+  kernelFallbackReason,
   navigationPreset,
   onChangeNavigationPreset,
   onRegenerate,
@@ -167,37 +175,60 @@ export function CommandStatusBar({
           </button>
         )}
 
-        <button
-          type="button"
-          className={`status-pill status-pill-btn${compiling ? " is-compiling" : !statusOk ? " is-error" : " is-ok"}`}
-          role="status"
-          title="点击重新再生与验证 (Ctrl+G)"
-          onClick={onRegenerate}
-        >
-          {compiling ? (
-            <>
-              <CadIcon name="spinner" size={12} />
-              <span>再生中…</span>
-            </>
-          ) : !statusOk ? (
-            <>
-              <CadIcon name="error" size={12} />
-              <span>{errorCount} 项错误</span>
-            </>
-          ) : (
-            <>
-              <CadIcon name="check" size={12} />
-              <span>就绪{compileTimeMs !== undefined ? ` · ${compileTimeMs.toFixed(0)}ms` : ""}</span>
-            </>
-          )}
-        </button>
+        {(() => {
+          const preview = statusOk && kernelAuthoritative === false;
+          const statusClass = compiling
+            ? " is-compiling"
+            : !statusOk
+              ? " is-error"
+              : preview
+                ? " is-preview"
+                : " is-ok";
+          const openChecks = Boolean((!statusOk || preview) && onOpenDiagnostics);
+          const statusTitle = !statusOk
+            ? "打开诊断面板查看编译错误"
+            : preview
+              ? kernelFallbackReason || "当前为解析预览内核，不是权威 OCCT B-Rep"
+              : "点击重新再生与验证 (Ctrl+G)";
+          const statusLabel = compiling
+            ? "再生中…"
+            : !statusOk
+              ? `${errorCount} 项错误`
+              : preview
+                ? "解析预览 · 非权威"
+                : `就绪${compileTimeMs !== undefined ? ` · ${compileTimeMs.toFixed(0)}ms` : ""}`;
+          return (
+            <button
+              type="button"
+              className={`status-pill status-pill-btn${statusClass}`}
+              role="status"
+              title={statusTitle}
+              onClick={openChecks ? onOpenDiagnostics : onRegenerate}
+            >
+              <CadIcon name={compiling ? "spinner" : !statusOk ? "error" : preview ? "warning" : "check"} size={12} />
+              <span>{statusLabel}</span>
+            </button>
+          );
+        })()}
 
         {statusOk && (
           <span
-            className={`status-pill${watertight ? " is-ok-subtle" : " is-warn"}`}
-            title={watertight ? "零开放边水密流形" : `存在 ${openEdgeCount ?? "未知"} 条开放边`}
+            className={`status-pill${kernelAuthoritative !== false && watertight ? " is-ok-subtle" : " is-warn"}`}
+            title={
+              kernelAuthoritative === false
+                ? `网格闭合仅为解析预览，不能代表权威 B-Rep 水密${kernelBackend ? `（内核 ${kernelBackend}）` : ""}`
+                : watertight
+                  ? "零开放边水密流形"
+                  : `存在 ${openEdgeCount ?? "未知"} 条开放边`
+            }
           >
-            {watertight ? "水密 ✔" : `开放边 ${openEdgeCount ?? "!"}`}
+            {kernelAuthoritative === false
+              ? watertight
+                ? "网格闭合（预览）"
+                : `开放边 ${openEdgeCount ?? "!"}`
+              : watertight
+                ? "水密 ✔"
+                : `开放边 ${openEdgeCount ?? "!"}`}
           </span>
         )}
 

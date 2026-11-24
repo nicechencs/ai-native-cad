@@ -1188,9 +1188,9 @@ pub(crate) fn resolve_cad_cli_bin() -> Result<PathBuf, String> {
         if path.is_file() {
             return Ok(path);
         }
-        return Err(format!(
-            "CAD_CLI_BIN does not point at a cad-cli binary: {}",
-            path.display()
+        return Err(structured_err(
+            "runtime_missing",
+            "环境变量 CAD_CLI_BIN 未指向有效的 cad-cli 程序，无法启动 AI 助手。",
         ));
     }
     let mut candidates = Vec::new();
@@ -1207,8 +1207,10 @@ pub(crate) fn resolve_cad_cli_bin() -> Result<PathBuf, String> {
         candidates.push(dir.join("cad-cli"));
     }
     newest_file(&candidates).ok_or_else(|| {
-        "Compiled cad-cli binary not found. Build it with cargo build -p cad-cli, or set CAD_CLI_BIN."
-            .to_string()
+        structured_err(
+            "runtime_missing",
+            "未找到 cad-cli 运行时，无法启动 AI 助手。请使用完整安装包，或设置环境变量 CAD_CLI_BIN。",
+        )
     })
 }
 
@@ -1283,13 +1285,13 @@ fn run_ai_agent_blocking(
 ) -> Result<AgentRunResult, String> {
     let store = default_store_path()?;
     apply_saved_profile(&mut request, &store)?;
+    // Guard unconfigured LLM before any Python / cad_agent / cad-cli runtime probe,
+    // so a portable bundle missing those modules still returns a Chinese config hint.
+    let _ = resolve_provider(&request, &current_env())?;
     let python = resolve_python_bin()?;
     let cad_cli = resolve_cad_cli_bin()?;
     let repo = repo_root();
-    let agent_src = repo.join("services").join("cad-agent").join("src");
-    if !agent_src.join("cad_agent").join("cli.py").is_file() {
-        return Err("cad_agent.cli was not found under services/cad-agent/src".to_string());
-    }
+    let agent_src = require_cad_agent_src(&repo)?;
     let work_dir = unique_dir("aicad-agent");
     fs::create_dir_all(&work_dir)
         .map_err(|err| format!("Failed to create agent work dir: {err}"))?;
@@ -1432,7 +1434,10 @@ fn resolve_python_bin() -> Result<String, String> {
             return Ok(candidate);
         }
     }
-    Err("Python was not found. Install Python 3.12+ or set CAD_AGENT_PYTHON.".to_string())
+    Err(structured_err(
+        "runtime_missing",
+        "未找到 Python 解释器，无法启动 AI 助手。请安装 Python 3.12+ 或设置环境变量 CAD_AGENT_PYTHON。",
+    ))
 }
 
 fn probe_agent_help(paths: &AgentPaths) -> String {
@@ -1491,15 +1496,28 @@ pub fn repo_root() -> PathBuf {
 }
 
 fn is_repo_root_candidate(dir: &Path) -> bool {
-    dir.join("services")
-        .join("cad-agent")
-        .join("src")
+    cad_agent_src(dir)
         .join("cad_agent")
         .join("cli.py")
         .is_file()
         || (dir.join("Cargo.toml").is_file()
             && dir.join("crates").is_dir()
             && dir.join("apps").is_dir())
+}
+
+fn cad_agent_src(repo: &Path) -> PathBuf {
+    repo.join("services").join("cad-agent").join("src")
+}
+
+fn require_cad_agent_src(repo: &Path) -> Result<PathBuf, String> {
+    let agent_src = cad_agent_src(repo);
+    if agent_src.join("cad_agent").join("cli.py").is_file() {
+        return Ok(agent_src);
+    }
+    Err(structured_err(
+        "runtime_missing",
+        "桌面安装包未包含 AI 运行模块 cad_agent，无法启动智能体。请使用完整安装包，或设置环境变量 AICAD_REPO_ROOT。",
+    ))
 }
 
 fn current_env() -> BTreeMap<String, String> {
@@ -1747,6 +1765,10 @@ pub fn config_file_is_private(path: &Path) -> bool {
     path_is_private(path)
 }
 
+fn structured_err(code: &str, message: impl AsRef<str>) -> String {
+    format!("AICAD_ERROR:{code}:{}", message.as_ref())
+}
+
 fn resolve_provider(
     request: &AgentGenerateRequest,
     base_env: &BTreeMap<String, String>,
@@ -1760,10 +1782,10 @@ fn resolve_provider(
         .unwrap_or("auto")
         .to_string();
     if provider == "template" {
-        return Err(
-            "已禁用离线假模板模式，请配置真实 LLM（OpenAI / Gemini）API Key 或本地兼容端点。"
-                .to_string(),
-        );
+        return Err(structured_err(
+            "llm_not_configured",
+            "已禁用离线假模板模式，请配置真实 LLM（OpenAI / Gemini）API Key 或本地兼容端点。",
+        ));
     }
     if !matches!(provider.as_str(), "auto" | "openai" | "gemini") {
         return Err(
@@ -1803,26 +1825,27 @@ fn resolve_provider(
         } else if has_env_gemini {
             provider = "gemini".to_string();
         } else {
-            return Err(
-                "未配置真实 LLM API Key，已禁用离线假模板回退。请配置 OpenAI / Gemini API Key 或本地兼容端点。"
-                    .to_string(),
-            );
+            return Err(structured_err(
+                "llm_not_configured",
+                "未配置真实 LLM API Key，已禁用离线假模板回退。请配置 OpenAI / Gemini API Key 或本地兼容端点。",
+            ));
         }
     }
     match provider.as_str() {
         "gemini" => {
             if api_key.is_none() && !has_env_gemini {
-                return Err(
-                    "未配置 Gemini API Key，请填写密钥或配置环境变量 GEMINI_API_KEY。".to_string(),
-                );
+                return Err(structured_err(
+                    "llm_not_configured",
+                    "未配置 Gemini API Key，请填写密钥或配置环境变量 GEMINI_API_KEY。",
+                ));
             }
         }
         "openai" => {
             if api_key.is_none() && !has_env_openai && base_url.is_empty() {
-                return Err(
-                    "未配置 OpenAI API Key，请填写密钥、本地兼容 Base URL 或配置环境变量 OPENAI_API_KEY。"
-                        .to_string(),
-                );
+                return Err(structured_err(
+                    "llm_not_configured",
+                    "未配置 OpenAI API Key，请填写密钥、本地兼容 Base URL 或配置环境变量 OPENAI_API_KEY。",
+                ));
             }
         }
         _ => {}
@@ -2388,5 +2411,3 @@ fn civil_from_days(days: i64) -> (i32, u32, u32) {
     let year = if month <= 2 { year + 1 } else { year };
     (year as i32, month as u32, day as u32)
 }
-
-

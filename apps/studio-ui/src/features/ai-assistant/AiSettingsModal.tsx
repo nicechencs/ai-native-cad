@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import type {
   AiConfigStatus,
   AiPresetId,
@@ -238,7 +239,6 @@ export function AiSettingsModal({
     try {
       await onResetAll();
       setSaveNotice({ kind: "ok", text: "已重置为默认配置" });
-      setDirty(false);
     } finally {
       setSaving(false);
     }
@@ -264,7 +264,7 @@ export function AiSettingsModal({
               ? { tone: "muted", text: "本地端点可选" }
               : { tone: "warn", text: "未配置密钥" };
 
-  return (
+  return createPortal(
     <div
       className="modal-backdrop"
       role="dialog"
@@ -293,7 +293,7 @@ export function AiSettingsModal({
         <div className="ai-settings-body">
           <aside className="ai-settings-sidebar" aria-label="模型配置方案列表">
             <div className="ai-settings-sidebar-top">
-              <span className="ai-settings-section-label">已保存方案 ({drafts.length})</span>
+              <span className="ai-settings-section-label">模型方案 ({drafts.length})</span>
               <button
                 type="button"
                 className="studio-btn studio-btn-sm studio-btn-primary"
@@ -627,13 +627,20 @@ export function AiSettingsModal({
               ) : (
                 <>
                   <CadIcon name="check" size={14} />
-                  <span>{dirty ? "保存配置" : "已保存"}</span>
+                  <span>
+                    {drafts.length === 0
+                      ? "无方案可保存"
+                      : dirty || profiles.length === 0
+                        ? "保存配置"
+                        : "已保存"}
+                  </span>
                 </>
               )}
             </button>
           </div>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

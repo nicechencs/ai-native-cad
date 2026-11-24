@@ -23,11 +23,37 @@ import type { AiRequestOptions, HoleOffsetHandle } from "../types/scene.ts";
 import { applyFaceQuickFeatureToKcl, type QuickFeatureKind } from "../utils/studioHelpers.ts";
 import { createTraceId, traceIdFrom } from "../utils/trace.ts";
 import { useEngineeringSession } from "./useEngineeringSession.ts";
+import {
+  shouldUndoContainerHistory,
+  type ContainerUndoHistory,
+} from "./containerUndoPolicy.ts";
+import { canApplyQuickFeature, selectedQuickFeatureTargetId } from "./quickFeatureApplyPolicy.ts";
 import { useWorkbenchAi } from "./useWorkbenchAi.ts";
 import type { useWorkbenchViewport } from "./useWorkbenchViewport.ts";
 import { selectDisplayedSolid, type SolidSelection } from "./displayedSolid.ts";
 import { quickFeatureNotice } from "./quickFeatureOutcome.ts";
 import { sourceUndoAction, WORKBENCH_FILE, type ApplySourceUpdate, type WorkbenchNotify } from "./workbenchSource.ts";
+
+
+function bytesToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  const step = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += step) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + step));
+  }
+  return btoa(binary);
+}
+
+function aicadProjectName(fileName: string, fallback = "model"): string {
+  const leaf = fileName.split(/[\\/]/).pop() ?? fallback;
+  const base = leaf.replace(/\.(kcl|aicad)$/i, "").trim();
+  return (base || fallback).slice(0, 80);
+}
+
+function defaultAicadPath(fileName: string): string {
+  return `projects/${aicadProjectName(fileName)}.aicad`;
+}
 
 function triggerDownload(filename: string, content: string | Uint8Array<ArrayBuffer>, mimeType: string): void {
   if (typeof document === "undefined" || typeof URL === "undefined") return;
@@ -57,7 +83,7 @@ export function useWorkbenchDocument(
     revision,
     designContract,
     verificationReport,
-    canUndo,
+    canUndo: sessionCanUndo,
     canRedo,
     dispatchSemanticCommand,
     undo,
@@ -73,8 +99,16 @@ export function useWorkbenchDocument(
   }>();
 
   const sourceFileInput = useRef<HTMLInputElement>(null);
+  const aicadFileInput = useRef<HTMLInputElement>(null);
+  const [documentFileName, setDocumentFileName] = useState(WORKBENCH_FILE);
+  const [documentProjectPath, setDocumentProjectPath] = useState<string | null>(null);
+  const [containerHistory, setContainerHistory] = useState<ContainerUndoHistory | null>(null);
+  const [baselineHeadSeq, setBaselineHeadSeq] = useState<number | null>(null);
+  const [savedSource, setSavedSource] = useState<string | null>(null);
+  const [pendingPreviewExport, setPendingPreviewExport] = useState<ExportKind | null>(null);
   const sourceFileRead = useRef<AbortController | null>(null);
   const exportRequest = useRef<AbortController | null>(null);
+  const containerUndoInFlight = useRef(false);
   const [exportState, setExportState] = useState<{
     revision: number;
     backend: WorkbenchBackend;
@@ -245,14 +279,14 @@ export function useWorkbenchDocument(
       try {
         const model = await compileWorkbenchPreview(
           backend,
-          { fileName: WORKBENCH_FILE, source: kclSource },
+          { fileName: documentFileName, source: kclSource },
           abort.signal,
         );
         if (isCurrent()) setCompiled({ revision, backend, model });
       } catch (error) {
         if (isCurrent()) {
           const info = transportErrorFrom(error, traceIdFrom(error) ?? createTraceId(), "compile");
-          setCompiled({ revision, backend, model: transportFailureModel(WORKBENCH_FILE, info) });
+          setCompiled({ revision, backend, model: transportFailureModel(documentFileName, info) });
         }
       }
     }, 240);
@@ -268,10 +302,10 @@ export function useWorkbenchDocument(
     () =>
       model ?? {
         sceneMesh: EMPTY_SCENE,
-        diagnostics: compileErrorReport(WORKBENCH_FILE),
+        diagnostics: compileErrorReport(documentFileName),
         origin: "demo" as const,
       },
-    [model],
+    [documentFileName, model],
   );
   const transportError = model?.transportError;
   const reportedTraceIds = useRef(new Set<string>());
@@ -297,6 +331,7 @@ export function useWorkbenchDocument(
       source: "编译",
       traceId,
       persistent: false,
+      action: { label: "查看诊断", commandId: "panel.openChecks" },
     });
   }, [model, notify, transportError]);
 
@@ -453,7 +488,37 @@ export function useWorkbenchDocument(
     }
   }, [activeProjectPath, backend, dispatchSemanticCommand, getStore, notify, previewActionPending]);
 
+  const hasUnsavedEdits = savedSource !== null && kclSource !== savedSource;
+
   const handleUndo = useCallback(() => {
+    const undoContainer = backend.undoAicadContainer;
+    if (
+      shouldUndoContainerHistory(containerHistory, { hasUnsavedEdits, baselineHeadSeq }) &&
+      documentProjectPath &&
+      typeof undoContainer === "function"
+    ) {
+      if (containerUndoInFlight.current) return;
+      containerUndoInFlight.current = true;
+      void (async () => {
+        try {
+          const undone = await undoContainer({ projectPath: documentProjectPath });
+          setContainerHistory(undone.history);
+          applySourceUpdate(undone.source, { summary: "撤销建模历史", recordHistory: false });
+          setSavedSource(undone.source);
+          pendingPreviewMetaRef.current = null;
+          cancelInFlightDocumentOps();
+          sourceRevisionRef.current = getStore().state.revision;
+          setPreview(undefined);
+          notify({ level: "info", title: "已撤销建模历史", detail: undone.projectPath, source: "编辑" });
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          notify({ level: "error", title: "撤销建模历史失败", detail, source: "编辑" });
+        } finally {
+          containerUndoInFlight.current = false;
+        }
+      })();
+      return;
+    }
     const entry = undo();
     if (!entry) return;
     pendingPreviewMetaRef.current = null;
@@ -461,7 +526,7 @@ export function useWorkbenchDocument(
     sourceRevisionRef.current = getStore().state.revision;
     setPreview(undefined);
     notify({ level: "info", title: `已撤销：${entry.summary}`, source: "编辑" });
-  }, [cancelInFlightDocumentOps, getStore, notify, undo]);
+  }, [applySourceUpdate, backend, baselineHeadSeq, cancelInFlightDocumentOps, containerHistory, documentProjectPath, getStore, hasUnsavedEdits, notify, undo]);
 
   const handleRedo = useCallback(() => {
     const entry = redo();
@@ -522,7 +587,7 @@ export function useWorkbenchDocument(
       try {
         const candidate = dispatchSessionCommand(getStore(), command).state.kclSource;
         const compiledModel = await backend.compile(
-          { fileName: WORKBENCH_FILE, source: candidate },
+          { fileName: documentFileName, source: candidate },
           abort.signal,
         );
         if (abort.signal.aborted) return;
@@ -572,13 +637,33 @@ export function useWorkbenchDocument(
 
   const handleApplyQuickFeature = useCallback(
     (featureKind: QuickFeatureKind, explicitSizeMm?: number) => {
-      const scene = evaluated.sceneMesh;
-      const targetId =
-        selectedTarget?.kind === "face"
-          ? selectedTarget.face.face_id
-          : selectedTarget?.kind === "edge"
-            ? selectedTarget.edge.edge_id
-            : scene.faces[0]?.face_id ?? scene.part_name;
+      const applyGate = canApplyQuickFeature({
+        diagnosticsStatus: evaluated.diagnostics.status,
+        showingLastAccepted,
+        transportError: Boolean(transportError),
+        compilePending: compilePending || compiling,
+        displayedRevision: currentCompile?.revision,
+        sourceRevision: revision,
+      });
+      if (!applyGate.ok) {
+        notify({
+          level: "warning",
+          title: "无法应用该特征",
+          detail: applyGate.reason,
+          source: "快速建模",
+        });
+        return;
+      }
+      const targetId = selectedQuickFeatureTargetId(selectedTarget);
+      if (!targetId) {
+        notify({
+          level: "warning",
+          title: "无法应用该特征",
+          detail: "请先选中目标实体的边或面。多体 return [...] 工程不会在未选中时静默改写源码。",
+          source: "快速建模",
+        });
+        return;
+      }
       const parsedSize = explicitSizeMm ?? Number.parseFloat(quickParamInput);
       const { nextSource, summary } = applyFaceQuickFeatureToKcl(
         kclSource,
@@ -586,18 +671,48 @@ export function useWorkbenchDocument(
         featureKind,
         Number.isFinite(parsedSize) && parsedSize > 0 ? parsedSize : undefined,
       );
+      if (nextSource === kclSource) {
+        notify({
+          level: "warning",
+          title: "无法应用该特征",
+          detail: "请先选中目标实体的边或面。多体 return [...] 工程不会在未选中时静默改写源码。",
+          source: "快速建模",
+        });
+        return;
+      }
       const undoRevision = applySourceUpdate(nextSource, { summary });
       if (undoRevision !== undefined) {
         pendingQuickFeature.current = { revision: undoRevision, summary };
       }
     },
-    [evaluated.sceneMesh, kclSource, notify, quickParamInput, selectedTarget, applySourceUpdate],
+    [
+      applySourceUpdate,
+      compilePending,
+      compiling,
+      currentCompile?.revision,
+      evaluated.diagnostics.status,
+      kclSource,
+      notify,
+      quickParamInput,
+      revision,
+      selectedTarget,
+      showingLastAccepted,
+      transportError,
+    ],
   );
 
   const handleExportCommand = useCallback(
-    async (kind: ExportKind) => {
+    async (kind: ExportKind, options?: { allowNonAuthoritativePreview?: boolean }) => {
       if (!canExport || !model) {
         notify({ level: "warning", title: "当前模型不可导出", detail: "请先确保 KCL 编译通过且包含有效几何。", source: "导出" });
+        return;
+      }
+      if (
+        kind === "step" &&
+        model.diagnostics.metrics.kernel_authoritative === false &&
+        !options?.allowNonAuthoritativePreview
+      ) {
+        setPendingPreviewExport("step");
         return;
       }
       if (exportRequest.current || sourceRevisionRef.current !== revision) return;
@@ -608,9 +723,10 @@ export function useWorkbenchDocument(
         const output = await exportWorkbenchModel(
           backend,
           kind,
-          { fileName: WORKBENCH_FILE, source: kclSource },
+          { fileName: documentFileName, source: kclSource },
           model,
           abort.signal,
+          { allowNonAuthoritativePreview: options?.allowNonAuthoritativePreview },
         );
         if (abort.signal.aborted) return;
         if (output.download) {
@@ -658,6 +774,11 @@ export function useWorkbenchDocument(
       const source = new TextDecoder("utf-8", { fatal: true }).decode(await file.arrayBuffer());
       if (read.signal.aborted) return;
       const summary = `载入 ${file.name}`;
+      setDocumentFileName(file.name);
+      setDocumentProjectPath(null);
+      setContainerHistory(null);
+      setBaselineHeadSeq(null);
+      setSavedSource(source);
       applySourceUpdate(source, { summary, replaceDocument: true });
       onSourceLoaded("source");
       notify({ level: "success", title: summary, source: "文件" });
@@ -671,8 +792,71 @@ export function useWorkbenchDocument(
   }, [applySourceUpdate, notify, onSourceLoaded]);
 
   const handleDownloadSource = useCallback(() => {
-    triggerDownload(WORKBENCH_FILE, kclSource, "text/plain;charset=utf-8");
-  }, [kclSource]);
+    triggerDownload(documentFileName, kclSource, "text/plain;charset=utf-8");
+  }, [documentFileName, kclSource]);
+
+  const handleLoadAicadFile = useCallback(async (file: File) => {
+    sourceFileRead.current?.abort();
+    const read = new AbortController();
+    sourceFileRead.current = read;
+    try {
+      if (!/\.aicad$/i.test(file.name)) throw new Error("请选择 .aicad 工程文件。");
+      if (typeof backend.importAicadDocument !== "function") {
+        throw new Error("打开 .aicad 工程需要桌面应用。");
+      }
+      const opened = await backend.importAicadDocument(file.name, bytesToBase64(await file.arrayBuffer()));
+      if (read.signal.aborted) return;
+      const fileName = `${aicadProjectName(opened.projectName || file.name)}.aicad`;
+      setDocumentFileName(fileName);
+      setDocumentProjectPath(opened.projectPath);
+      setContainerHistory(opened.history ?? null);
+      setBaselineHeadSeq(opened.history?.headSeq ?? null);
+      setSavedSource(opened.source);
+      applySourceUpdate(opened.source, { summary: `打开 ${fileName}`, replaceDocument: true });
+      onSourceLoaded("source");
+      notify({ level: "success", title: `已打开 ${fileName}`, detail: opened.projectPath, source: "文件" });
+    } catch (error) {
+      if (read.signal.aborted) return;
+      const detail = error instanceof Error ? error.message : String(error);
+      notify({ level: "error", title: "打开 .aicad 工程失败", detail, source: "文件" });
+    } finally {
+      if (sourceFileRead.current === read) sourceFileRead.current = null;
+    }
+  }, [applySourceUpdate, backend, notify, onSourceLoaded]);
+
+  const handleSaveAicadProject = useCallback(async () => {
+    if (typeof backend.saveAicadDocument !== "function") {
+      notify({ level: "error", title: "保存 .aicad 工程失败", detail: "保存 .aicad 工程需要桌面应用。", source: "文件" });
+      return;
+    }
+    try {
+      const projectName = aicadProjectName(documentFileName);
+      const projectPath = documentProjectPath ?? defaultAicadPath(documentFileName);
+      const saved = await backend.saveAicadDocument({
+        projectPath,
+        projectName,
+        source: kclSource,
+      });
+      const fileName = `${aicadProjectName(saved.projectName)}.aicad`;
+      setDocumentFileName(fileName);
+      setDocumentProjectPath(saved.projectPath);
+      setContainerHistory(saved.history ?? null);
+      setBaselineHeadSeq((prev) => (prev === null ? (saved.history?.headSeq ?? null) : prev));
+      setSavedSource(kclSource);
+      notify({
+        level: "success",
+        title: `已保存 ${fileName}`,
+        detail: saved.projectPath,
+        source: "文件",
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      notify({ level: "error", title: "保存 .aicad 工程失败", detail, source: "文件" });
+    }
+  }, [backend, documentFileName, documentProjectPath, kclSource, notify]);
+
+
+  const canUndo = sessionCanUndo || shouldUndoContainerHistory(containerHistory, { hasUnsavedEdits, baselineHeadSeq });
 
   return {
     kclSource,
@@ -709,6 +893,25 @@ export function useWorkbenchDocument(
     handleExportCommand,
     handleLoadKclFile,
     handleDownloadSource,
+    handleLoadAicadFile,
+    handleSaveAicadProject,
+    documentFileName,
+    setDocumentFileName: (name: string) => {
+      setDocumentFileName(name);
+      setDocumentProjectPath(null);
+      setContainerHistory(null);
+      setBaselineHeadSeq(null);
+      setSavedSource(null);
+    },
+    aicadFileInput,
+    pendingPreviewExport,
+    confirmPreviewExport: () => {
+      const kind = pendingPreviewExport;
+      setPendingPreviewExport(null);
+      if (kind) void handleExportCommand(kind, { allowNonAuthoritativePreview: true });
+    },
+    cancelPreviewExport: () => setPendingPreviewExport(null),
+
     aiConfigStatus,
     aiProfiles,
     activeAiProfileId,

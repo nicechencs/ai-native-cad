@@ -371,14 +371,364 @@ export type QuickFeatureKind =
   | "fillet_edges"
   | "chamfer_edges";
 
+const UNPREFIXED_OCCT_ID = /^(occt_edge_|occt_face_|occt-edge-|occt-face-)/;
+
+/**
+ * Map a selected face/edge id onto a solid name.
+ *
+ * Multi-body meshes use `{solid}_occt_edge_*`. A single terminal solid keeps the
+ * kernel's unprefixed `occt_edge_*` (see graph_eval when terminal_ids.len()==1).
+ * Unprefixed ids may map only when there is exactly one returned solid.
+ * They must not pick the first of several bodies, and a leftover
+ * `hole_fillet_occt_*` id must not map onto a shorter `hole`.
+ */
+export function solidNameFromSelectionId(
+  selectionId: string,
+  candidates: readonly string[],
+  returnedSolids: readonly string[] = candidates,
+): string | null {
+  const id = selectionId.trim();
+  if (!id) return null;
+  if (UNPREFIXED_OCCT_ID.test(id)) {
+    const terminals = returnedSolids.length > 0 ? returnedSolids : [];
+    const unique = [...new Set(terminals)];
+    return unique.length === 1 ? unique[0] : null;
+  }
+  if (candidates.length === 0) return null;
+  if (candidates.includes(id)) return id;
+  let best: string | null = null;
+  for (const name of candidates) {
+    if (id === name || id.startsWith(`${name}_`) || id.startsWith(`${name}-`)) {
+      if (!best || name.length > best.length) best = name;
+    }
+  }
+  // Prefixed OCCT ids must use the ident immediately before `_occt_`.
+  if (best && /(?:_occt_|-occt-)/.test(id)) {
+    if (id !== best && !id.startsWith(`${best}_occt_`) && !id.startsWith(`${best}-occt-`)) {
+      return null;
+    }
+  }
+  return best;
+}
+
+function collectConsumedIrSolidIdents(source: string): Set<string> {
+  const consumed = new Set<string>();
+  const blockRe = /(?:^|[\n\r])\s*let\s+[A-Za-z_]\w*\s*=\s*[A-Za-z_]\w*\s*\{([^}]*)\}/g;
+  let match: RegExpExecArray | null = blockRe.exec(source);
+  while (match) {
+    const body = match[1] ?? "";
+    const singleRefRe = /\b(?:solid|target)\s*=\s*([A-Za-z_]\w*)/g;
+    let refMatch: RegExpExecArray | null = singleRefRe.exec(body);
+    while (refMatch) {
+      consumed.add(refMatch[1]);
+      refMatch = singleRefRe.exec(body);
+    }
+    const toolsMatch = /\btools\s*=\s*\[([^\]]*)\]/.exec(body);
+    if (toolsMatch) {
+      for (const part of toolsMatch[1].split(",")) {
+        const ident = part.trim();
+        if (/^[A-Za-z_]\w*$/.test(ident)) consumed.add(ident);
+      }
+    }
+    match = blockRe.exec(source);
+  }
+  return consumed;
+}
+
+function collectReturnedSolidIdents(source: string): string[] {
+  let idents: string[] = [];
+  for (const line of source.split(/\r?\n/)) {
+    const info = returnArrayIdents(line);
+    if (info) {
+      idents = info.idents;
+      continue;
+    }
+    const bare = /^\s*return\s+([A-Za-z_]\w*)\s*(?:\/\/.*)?$/.exec(line);
+    if (bare) idents = [bare[1]];
+  }
+  if (idents.length <= 1) return idents;
+  // Mirror crates/cad-evaluator `terminal_finished_output_ids`: a single
+  // terminal solid (e.g. `return [block, hole]` where `hole` consumes `block`)
+  // keeps unprefixed `occt_edge_*` / `occt_face_*` ids in the scene mesh.
+  const consumed = collectConsumedIrSolidIdents(source);
+  const terminals = idents.filter((ident) => !consumed.has(ident));
+  return terminals.length > 0 ? terminals : idents;
+}
+
+function mapIrSelectionToSolid(selectionId: string, source: string): string | null {
+  return solidNameFromSelectionId(
+    selectionId,
+    collectSolidCandidates(source),
+    collectReturnedSolidIdents(source),
+  );
+}
+
+/** True when the buffer is a `.kcl 2.0` / `@ir_schema` feature document, not CAD-DSL `part`. */
+export function isIrSchemaKcl(source: string): boolean {
+  return /(?:^|[\n\r])\s*@ir_schema\s*\(/.test(source);
+}
+
+function letBoundIdents(source: string): string[] {
+  const idents: string[] = [];
+  const re = /(?:^|[\n\r])\s*let\s+([A-Za-z_]\w*)\s*=/g;
+  let match: RegExpExecArray | null = re.exec(source);
+  while (match) {
+    idents.push(match[1]);
+    match = re.exec(source);
+  }
+  return idents;
+}
+
+function kclLetIdentExists(source: string, ident: string): boolean {
+  return new RegExp(String.raw`(?:^|[\n\r])\s*let\s+${ident}\s*=`).test(source);
+}
+
+function allocateKclIdent(source: string, base: string): string {
+  if (!kclLetIdentExists(source, base)) return base;
+  for (let i = 2; i < 1000; i += 1) {
+    const candidate = `${base}_${i}`;
+    if (!kclLetIdentExists(source, candidate)) return candidate;
+  }
+  return `${base}_${Date.now()}`;
+}
+
+function rewriteReturnArrayIdent(source: string, fromIdent: string, toIdent: string): string {
+  if (fromIdent === toIdent) return source;
+  const newline = source.includes("\r\n") ? "\r\n" : "\n";
+  const lines = source.split(/\r?\n/);
+  const next = lines.map((line) => {
+    const parsed = returnArrayIdents(line);
+    if (!parsed || !parsed.idents.includes(fromIdent)) return line;
+    const match = /^(\s*return\s*\[)([^\]]+)(\].*)$/.exec(line);
+    if (!match) return line;
+    const rewritten = match[2]
+      .split(",")
+      .map((part) => {
+        const ident = part.trim();
+        if (ident !== fromIdent) return part;
+        const leading = part.match(/^\s*/)?.[0] ?? "";
+        const trailing = part.match(/\s*$/)?.[0] ?? "";
+        return `${leading}${toIdent}${trailing}`;
+      })
+      .join(",");
+    return `${match[1]}${rewritten}${match[3]}`;
+  });
+  return next.join(newline);
+}
+
+/** Rewrite both `return [..., fromIdent, ...]` and a single-ident `return fromIdent`. */
+function rewriteReturnIdent(source: string, fromIdent: string, toIdent: string): string {
+  if (fromIdent === toIdent) return source;
+  const afterArray = rewriteReturnArrayIdent(source, fromIdent, toIdent);
+  const newline = afterArray.includes("\r\n") ? "\r\n" : "\n";
+  return afterArray
+    .split(/\r?\n/)
+    .map((line) => {
+      const match = /^(\s*return\s+)([A-Za-z_]\w*)(\s*(?:\/\/.*)?)?$/.exec(line);
+      if (!match || match[2] !== fromIdent) return line;
+      // Feature-KCL requires `return [ident]`; a bare `return ident` is E002.
+      return `${match[1]}[${toIdent}]${match[3] ?? ""}`;
+    })
+    .join(newline);
+}
+
+function formatKclScalar(value: number): string {
+  if (!Number.isFinite(value)) return "0";
+  if (Number.isInteger(value)) return String(value);
+  return String(Math.round(value * 10_000) / 10_000);
+}
+
+/** Top-face center of a `let <ident> = box { ... }` (following upstream `solid = ...` links), or null. */
+function boxTopCenterOrigin(source: string, ident: string): string | null {
+  let current: string | null = ident;
+  const visited = new Set<string>();
+  for (let depth = 0; depth < 16 && current; depth += 1) {
+    if (visited.has(current)) return null;
+    visited.add(current);
+    const boxBlock = new RegExp(
+      String.raw`(?:^|[\n\r])\s*let\s+${current}\s*=\s*box\s*\{([^}]*)\}`,
+    ).exec(source);
+    if (boxBlock) {
+      const body = boxBlock[1] ?? "";
+      const mm = (field: string): number | null => {
+        const match = new RegExp(String.raw`\b${field}\s*=\s*(-?\d+(?:\.\d+)?)mm`).exec(body);
+        return match ? Number(match[1]) : null;
+      };
+      const width = mm("width");
+      const depthVal = mm("depth");
+      const height = mm("height");
+      if (width === null || depthVal === null || height === null) return null;
+      let originX = 0;
+      let originY = 0;
+      let originZ = 0;
+      const origin = /\borigin\s*=\s*vec3\(\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\)/.exec(
+        body,
+      );
+      if (origin) {
+        originX = Number(origin[1]);
+        originY = Number(origin[2]);
+        originZ = Number(origin[3]);
+      }
+      return `vec3(${formatKclScalar(originX + width / 2)}, ${formatKclScalar(originY + depthVal / 2)}, ${formatKclScalar(originZ + height)})`;
+    }
+    const featureBlock: RegExpExecArray | null = new RegExp(
+      String.raw`(?:^|[\n\r])\s*let\s+${current}\s*=\s*[A-Za-z_]\w*\s*\{([^}]*)\}`,
+    ).exec(source);
+    const parentSolid: string | null = featureBlock?.[1]
+      ? /\b(?:solid|target)\s*=\s*([A-Za-z_]\w*)/.exec(featureBlock[1])?.[1] ?? null
+      : null;
+    current = parentSolid;
+  }
+  return null;
+}
+
+function updateIrHoleBinding(
+  source: string,
+  bindingPrefix: string,
+  targetVar: string,
+  rewriteBody: (body: string) => string | null,
+): string | null {
+  const re = new RegExp(
+    String.raw`let\s+(${bindingPrefix}(?:_\d+)?)\s*=\s*hole\s*\{([^}]*)\}(\s*->\s*Solid)?`,
+    "g",
+  );
+  const matches = Array.from(source.matchAll(re)).filter((entry) => {
+    const binding = entry[1] ?? "";
+    const body = entry[2] ?? "";
+    const solid = /\bsolid\s*=\s*([A-Za-z_]\w*)/.exec(body)?.[1];
+    return binding === targetVar || solid === targetVar;
+  });
+  const match =
+    matches.find((entry) => entry[1] === targetVar) ??
+    matches[0];
+  if (!match || match.index === undefined) return null;
+  const nextBody = rewriteBody(match[2] ?? "");
+  if (nextBody === null) return null;
+  const tail = match[3] ?? "";
+  return (
+    source.slice(0, match.index) +
+    `let ${match[1]} = hole {${nextBody}}${tail}` +
+    source.slice(match.index + match[0].length)
+  );
+}
+
+function replaceIrHoleDiameter(body: string, diameterText: string): string | null {
+  if (!/\bdiameter\s*=\s*\d+(?:\.\d+)?mm/.test(body)) return null;
+  return body.replace(/\bdiameter\s*=\s*\d+(?:\.\d+)?mm/, `diameter = ${diameterText}`);
+}
+
+function replaceIrCounterboreProfile(
+  body: string,
+  diameterText: string,
+  depthText: string,
+): string | null {
+  const profile = /profile\s*=\s*counterbore\(\s*diameter\s*=\s*\d+(?:\.\d+)?mm\s*,\s*depth\s*=\s*\d+(?:\.\d+)?mm\s*\)/;
+  if (!profile.test(body)) return null;
+  return body.replace(
+    profile,
+    `profile = counterbore(diameter = ${diameterText}, depth = ${depthText})`,
+  );
+}
+
+function irHoleBlockLines(
+  indent: string,
+  binding: string,
+  solidName: string,
+  source: string,
+  extraFields: readonly string[],
+): string[] {
+  const origin = boxTopCenterOrigin(source, solidName);
+  const fields = [
+    `${indent}    solid = ${solidName},`,
+    ...(origin ? [`${indent}    origin = ${origin},`] : []),
+    ...extraFields.map((field) => `${indent}    ${field}`),
+  ];
+  return [`${indent}let ${binding} = hole {`, ...fields, `${indent}} -> Solid`];
+}
+
+function updateIrDressupField(
+  source: string,
+  operator: "fillet" | "chamfer",
+  solidName: string,
+  field: "radius" | "distance",
+  valueText: string,
+): string | null {
+  const re = new RegExp(
+    String.raw`let\s+([A-Za-z_]\w*)\s*=\s*${operator}\s*\{([^}]*)\}(\s*->\s*Solid)?`,
+    "g",
+  );
+  const matches = Array.from(source.matchAll(re)).filter((entry) => {
+    const binding = entry[1] ?? "";
+    const body = entry[2] ?? "";
+    const solid = /\bsolid\s*=\s*([A-Za-z_]\w*)/.exec(body)?.[1];
+    const hasField = new RegExp(String.raw`\b${field}\s*=\s*\d+(?:\.\d+)?mm`).test(body);
+    // Prefer matching the selected node's own ident (hole_fillet_occt_edge_* → hole_fillet)
+    // so a second apply updates radius instead of nesting hole_fillet_fillet.
+    return hasField && (binding === solidName || solid === solidName);
+  });
+  const match =
+    matches.find((entry) => entry[1] === solidName) ??
+    matches.find((entry) => {
+      const body = entry[2] ?? "";
+      const solid = /\bsolid\s*=\s*([A-Za-z_]\w*)/.exec(body)?.[1];
+      return solid === solidName;
+    });
+  if (!match || match.index === undefined) return null;
+  const nextBody = (match[2] ?? "").replace(
+    new RegExp(String.raw`(\b${field}\s*=\s*)(\d+(?:\.\d+)?)mm`),
+    `$1${valueText}`,
+  );
+  const tail = match[3] ?? "";
+  return (
+    source.slice(0, match.index) +
+    `let ${match[1]} = ${operator} {${nextBody}}${tail}` +
+    source.slice(match.index + match[0].length)
+  );
+}
+
+function stripIllegalPipeDressup(source: string, targetVar: string): string {
+  const re = new RegExp(
+    String.raw`(^|[\n\r])([ \t]*let\s+${targetVar}\s*=\s*${targetVar}\s*\|>\s*(?:fillet|chamfer)\([^)]*\)[ \t]*)(?=\r?\n|$)`,
+    "g",
+  );
+  return source.replace(re, "$1").replace(/\n{3,}/g, "\n\n");
+}
+
+function collectSolidCandidates(source: string): string[] {
+  const candidates: string[] = [];
+  for (const ident of letBoundIdents(source)) {
+    if (!candidates.includes(ident)) candidates.push(ident);
+  }
+  for (const line of source.split(/\r?\n/)) {
+    const info = returnArrayIdents(line);
+    if (!info) continue;
+    for (const ident of info.idents) {
+      if (!candidates.includes(ident)) candidates.push(ident);
+    }
+  }
+  return candidates;
+}
+
+function returnArrayIdents(line: string): { indent: string; idents: string[] } | null {
+  const m = /^(\s*)return\s*\[([^\]]+)\]\s*(?:\/\/.*)?$/.exec(line);
+  if (!m) return null;
+  const idents = m[2]
+    .split(",")
+    .map((part) => part.trim())
+    .filter((part) => /^[A-Za-z_]\w*$/.test(part));
+  if (idents.length === 0) return null;
+  return { indent: m[1] || "    ", idents };
+}
+
 function insertQuickFeatureBeforeReturn(
   kclSource: string,
   buildStatements: (indent: string, targetVar: string) => readonly string[],
+  selectionId?: string,
 ): string {
   const newline = kclSource.includes("\r\n") ? "\r\n" : "\n";
   const lines = kclSource.split(/\r?\n/);
 
-  // Prefer the last `return <ident>` inside a `part` block (skipping assembly `return [...]`).
+  // Prefer the last `return <ident>` inside a `part` block.
   let targetLineIdx = -1;
   let targetIndent = "    ";
   let targetVar = "";
@@ -398,6 +748,29 @@ function insertQuickFeatureBeforeReturn(
       ...lines.slice(0, targetLineIdx),
       ...inserted,
       ...lines.slice(targetLineIdx),
+    ];
+    return updatedLines.join(newline);
+  }
+
+  // Multi-body `@ir_schema` documents return `[hole, block2, ...]`.
+  // Previously this path was skipped, so GUI 圆角 on the C6 fixture was a silent no-op.
+  let arrayLineIdx = -1;
+  let arrayInfo: { indent: string; idents: string[] } | null = null;
+  for (let i = 0; i < lines.length; i += 1) {
+    const info = returnArrayIdents(lines[i]);
+    if (info) {
+      arrayLineIdx = i;
+      arrayInfo = info;
+    }
+  }
+  if (arrayLineIdx >= 0 && arrayInfo) {
+    const target = mapIrSelectionToSolid(selectionId ?? "", kclSource);
+    if (!target) return kclSource;
+    const inserted = buildStatements(arrayInfo.indent, target);
+    const updatedLines = [
+      ...lines.slice(0, arrayLineIdx),
+      ...inserted,
+      ...lines.slice(arrayLineIdx),
     ];
     return updatedLines.join(newline);
   }
@@ -438,6 +811,41 @@ export function applyFaceQuickFeatureToKcl(
         ? paramValueMm
         : 2.0;
     const rText = `${rVal.toFixed(1)}mm`;
+    if (isIrSchemaKcl(kclSource)) {
+      const targetVar = mapIrSelectionToSolid(faceId, kclSource) ?? "";
+      if (!targetVar) {
+        return { nextSource: kclSource, summary: `无法应用该特征` };
+      }
+      const stripped = stripIllegalPipeDressup(kclSource, targetVar);
+      const updated = updateIrDressupField(stripped, "fillet", targetVar, "radius", rText);
+      if (updated) {
+        return {
+          nextSource: updated,
+          summary: `已在 ${faceLabel} 更新圆角特征 fillet(radius = ${rText})`,
+        };
+      }
+      let freshName = "";
+      const inserted = insertQuickFeatureBeforeReturn(
+        stripped,
+        (indent, solidName) => {
+          freshName = allocateKclIdent(stripped, `${solidName}_fillet`);
+          return [
+            `${indent}let ${freshName} = fillet {`,
+            `${indent}    solid = ${solidName},`,
+            `${indent}    radius = ${rText},`,
+            `${indent}} -> Solid`,
+          ];
+        },
+        faceId,
+      );
+      if (inserted === stripped || !freshName) {
+        return { nextSource: kclSource, summary: `无法应用该特征` };
+      }
+      return {
+        nextSource: rewriteReturnIdent(inserted, targetVar, freshName),
+        summary: `已在 ${faceLabel} 添加圆角特征 fillet(radius = ${rText})`,
+      };
+    }
     const existingFilletRe = /(\|>\s*fillet\(\s*(?:r\s*=\s*)?)(\d+(?:\.\d+)?)mm(\s*\))/;
     if (existingFilletRe.test(kclSource)) {
       const nextSource = kclSource.replace(existingFilletRe, `$1${rText}$3`);
@@ -451,6 +859,7 @@ export function applyFaceQuickFeatureToKcl(
       (indent, targetVar) => [
         `${indent}let ${targetVar} = ${targetVar} |> fillet(r = ${rText})`,
       ],
+      faceId,
     );
     return {
       nextSource,
@@ -464,6 +873,41 @@ export function applyFaceQuickFeatureToKcl(
         ? paramValueMm
         : 1.5;
     const dText = `${dVal.toFixed(1)}mm`;
+    if (isIrSchemaKcl(kclSource)) {
+      const targetVar = mapIrSelectionToSolid(faceId, kclSource) ?? "";
+      if (!targetVar) {
+        return { nextSource: kclSource, summary: `无法应用该特征` };
+      }
+      const stripped = stripIllegalPipeDressup(kclSource, targetVar);
+      const updated = updateIrDressupField(stripped, "chamfer", targetVar, "distance", dText);
+      if (updated) {
+        return {
+          nextSource: updated,
+          summary: `已在 ${faceLabel} 更新倒角特征 chamfer(distance = ${dText})`,
+        };
+      }
+      let freshName = "";
+      const inserted = insertQuickFeatureBeforeReturn(
+        stripped,
+        (indent, solidName) => {
+          freshName = allocateKclIdent(stripped, `${solidName}_chamfer`);
+          return [
+            `${indent}let ${freshName} = chamfer {`,
+            `${indent}    solid = ${solidName},`,
+            `${indent}    distance = ${dText},`,
+            `${indent}} -> Solid`,
+          ];
+        },
+        faceId,
+      );
+      if (inserted === stripped || !freshName) {
+        return { nextSource: kclSource, summary: `无法应用该特征` };
+      }
+      return {
+        nextSource: rewriteReturnIdent(inserted, targetVar, freshName),
+        summary: `已在 ${faceLabel} 添加倒角特征 chamfer(distance = ${dText})`,
+      };
+    }
     const existingChamferRe = /(\|>\s*chamfer\(\s*(?:d\s*=\s*)?)(\d+(?:\.\d+)?)mm(\s*\))/;
     if (existingChamferRe.test(kclSource)) {
       const nextSource = kclSource.replace(existingChamferRe, `$1${dText}$3`);
@@ -477,6 +921,7 @@ export function applyFaceQuickFeatureToKcl(
       (indent, targetVar) => [
         `${indent}let ${targetVar} = ${targetVar} |> chamfer(d = ${dText})`,
       ],
+      faceId,
     );
     return {
       nextSource,
@@ -490,6 +935,37 @@ export function applyFaceQuickFeatureToKcl(
         ? paramValueMm
         : 6.6;
     const dText = `${dVal.toFixed(1)}mm`;
+    if (isIrSchemaKcl(kclSource)) {
+      const targetVar = mapIrSelectionToSolid(faceId, kclSource) ?? "";
+      if (!targetVar) {
+        return { nextSource: kclSource, summary: `无法应用该特征` };
+      }
+      const updated = updateIrHoleBinding(kclSource, "quick_through_hole", targetVar, (body) =>
+        replaceIrHoleDiameter(body, dText),
+      );
+      if (updated) {
+        return {
+          nextSource: updated,
+          summary: `已在 ${faceLabel} 更新定位通孔 hole(diameter = ${dText})`,
+        };
+      }
+      let freshName = "";
+      const inserted = insertQuickFeatureBeforeReturn(
+        kclSource,
+        (indent, solidName) => {
+          freshName = allocateKclIdent(kclSource, "quick_through_hole");
+          return irHoleBlockLines(indent, freshName, solidName, kclSource, [`diameter = ${dText},`]);
+        },
+        faceId,
+      );
+      if (inserted === kclSource || !freshName) {
+        return { nextSource: kclSource, summary: `无法应用该特征` };
+      }
+      return {
+        nextSource: rewriteReturnIdent(inserted, targetVar, freshName),
+        summary: `已在 ${faceLabel} 添加定位通孔 hole(diameter = ${dText})`,
+      };
+    }
     const existingHoleRe =
       /(let\s+quick_through_hole\s*=\s*hole::simple\(\s*d\s*=\s*)(\d+(?:\.\d+)?)mm/;
     if (existingHoleRe.test(kclSource)) {
@@ -505,6 +981,7 @@ export function applyFaceQuickFeatureToKcl(
         `${indent}let quick_through_hole = hole::simple(d = ${dText}, depth = 15.0mm)`,
         `${indent}let ${targetVar} = ${targetVar} |> boolean::subtract(tools = [quick_through_hole], preserve_exact_interfaces = true)`,
       ],
+      faceId,
     );
     return {
       nextSource,
@@ -526,6 +1003,42 @@ export function applyFaceQuickFeatureToKcl(
   const dThroughText = `${dThrough.toFixed(1)}mm`;
   const dCboreText = `${dCbore.toFixed(1)}mm`;
   const depthCboreText = `${depthCbore.toFixed(1)}mm`;
+  if (isIrSchemaKcl(kclSource)) {
+    const targetVar = mapIrSelectionToSolid(faceId, kclSource) ?? "";
+    if (!targetVar) {
+      return { nextSource: kclSource, summary: `无法应用该特征` };
+    }
+    const updated = updateIrHoleBinding(kclSource, "quick_cbore_hole", targetVar, (body) => {
+      const withDiameter = replaceIrHoleDiameter(body, dThroughText);
+      if (withDiameter === null) return null;
+      return replaceIrCounterboreProfile(withDiameter, dCboreText, depthCboreText);
+    });
+    if (updated) {
+      return {
+        nextSource: updated,
+        summary: `已在 ${faceLabel} 更新沉头孔 hole(diameter = ${dThroughText}, profile = counterbore(diameter = ${dCboreText}, depth = ${depthCboreText}))`,
+      };
+    }
+    let freshName = "";
+    const inserted = insertQuickFeatureBeforeReturn(
+      kclSource,
+      (indent, solidName) => {
+        freshName = allocateKclIdent(kclSource, "quick_cbore_hole");
+        return irHoleBlockLines(indent, freshName, solidName, kclSource, [
+          `diameter = ${dThroughText},`,
+          `profile = counterbore(diameter = ${dCboreText}, depth = ${depthCboreText}),`,
+        ]);
+      },
+      faceId,
+    );
+    if (inserted === kclSource || !freshName) {
+      return { nextSource: kclSource, summary: `无法应用该特征` };
+    }
+    return {
+      nextSource: rewriteReturnIdent(inserted, targetVar, freshName),
+      summary: `已在 ${faceLabel} 添加沉头孔 hole(diameter = ${dThroughText}, profile = counterbore(diameter = ${dCboreText}, depth = ${depthCboreText}))`,
+    };
+  }
   const existingCboreRe =
     /let\s+quick_cbore_hole\s*=\s*hole::counterbore\([^)]*\)/;
   if (existingCboreRe.test(kclSource)) {
@@ -544,6 +1057,7 @@ export function applyFaceQuickFeatureToKcl(
       `${indent}let quick_cbore_hole = hole::counterbore(d_through = ${dThroughText}, d_cbore = ${dCboreText}, depth_cbore = ${depthCboreText})`,
       `${indent}let ${targetVar} = ${targetVar} |> boolean::subtract(tools = [quick_cbore_hole], preserve_exact_interfaces = true)`,
     ],
+    faceId,
   );
   return {
     nextSource,

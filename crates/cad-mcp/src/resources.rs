@@ -87,6 +87,10 @@ const FEATURE_ALIASES: &[(&str, &str)] = &[
     ("Sweep", "sweep_profile"),
     ("MateConstraint", "add_mate"),
     ("mate_constraint", "add_mate"),
+    // TES-1-P1-C4: aicad://schema/feature/boolean used to return unknown feature.
+    ("boolean", "boolean_solids"),
+    ("Boolean", "boolean_solids"),
+    ("BooleanSolids", "boolean_solids"),
 ];
 
 pub fn list_resources() -> Value {

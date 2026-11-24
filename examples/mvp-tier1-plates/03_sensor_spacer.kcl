@@ -1,0 +1,55 @@
+// MVP Tier 1 Golden Part 03: 传感器精密垫高块（矩形拉伸草图 + 中心 H8 通孔 + 双侧 M5 安装孔）
+
+@unit(length = "mm", angle = "deg", force = "N")
+@material("Al-7075-T6")
+@manufacturing(method = "CNC_3AXIS_MILLING", min_tool_radius = 1.5mm)
+
+part SensorSpacer(
+    spacer_length: Length = 64.0mm,
+    spacer_width: Length = 32.0mm,
+    spacer_height: Length = 18.0mm,
+    sensor_bore_d: Length = 16.0mm @pmi::tolerance("H8", roughness = "Ra1.6"),
+    hole_pitch: Length = 44.0mm,
+    mount_hole_d: Length = 5.5mm
+) -> Solid {
+    let spacer_body = sketch(plane = XY_PLANE) {
+        let outer_rect = rectangle(
+            center = [0.0mm, 0.0mm],
+            width = spacer_length,
+            height = spacer_width
+        )
+        region::closed([outer_rect])
+    }
+    |> extrude(height = spacer_height)
+    |> chamfer(d = 1.0mm)
+
+    let sensor_bore_tool = cylinder(
+        d = sensor_bore_d,
+        h = spacer_height + 2.0mm,
+        origin = [0.0mm, 0.0mm, -1.0mm],
+        exact_brep = true
+    )
+    |> tag::cylindrical_faces("sensor_window_bore")
+
+    let mount_holes = hole::simple(
+        d = mount_hole_d,
+        depth = spacer_height + 2.0mm,
+        origin = [-hole_pitch / 2.0, 0.0mm, spacer_height + 1.0mm]
+    )
+    |> array::linear(axis = X_AXIS, count = 2, spacing = hole_pitch)
+    |> tag::faces("mount_through_holes")
+
+    let final_part = spacer_body
+        |> boolean::subtract(
+            tools = [sensor_bore_tool, mount_holes],
+            preserve_exact_interfaces = true
+        )
+
+    let bottom_datum = final_part.faces().planar().filter(normal = -Z).min_by(coord = Z)
+        |> pmi::datum("A", flatness = 0.015mm)
+
+    assert::bbox(target = final_part, max_size = [70.0mm, 40.0mm, 22.0mm])
+    assert::dfm_accessible(target = final_part, axes = [+Z, -Z], min_wall_thickness = 3.0mm)
+
+    return final_part
+}

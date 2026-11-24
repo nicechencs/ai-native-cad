@@ -1,0 +1,76 @@
+// MVP Tier 1 Golden Part 05: 精密轴承端盖（止口定位台阶 + H7 轴承沉孔 + 4x M5 圆周螺栓孔）
+
+@unit(length = "mm", angle = "deg", force = "N")
+@material("Al-6061-T6")
+@manufacturing(method = "CNC_TURNING", min_tool_radius = 1.0mm)
+
+part BearingEndCap(
+    cap_od: Length = 88.0mm,
+    spigot_od: Length = 62.0mm @pmi::tolerance("f7", roughness = "Ra1.6"),
+    shaft_bore_d: Length = 30.0mm,
+    bearing_pocket_d: Length = 52.0mm @pmi::tolerance("H7", roughness = "Ra0.8"),
+    flange_h: Length = 8.0mm,
+    spigot_h: Length = 6.0mm,
+    pocket_depth: Length = 9.0mm,
+    bolt_pcd: Length = 74.0mm,
+    bolt_count: u32 = 4
+) -> Solid {
+    let total_h = flange_h + spigot_h
+    let bolt_radius = bolt_pcd / 2.0
+
+    let flange_disk = cylinder(
+        d = cap_od,
+        h = flange_h,
+        origin = [0.0mm, 0.0mm, 0.0mm]
+    )
+    let spigot_boss = cylinder(
+        d = spigot_od,
+        h = spigot_h,
+        origin = [0.0mm, 0.0mm, flange_h],
+        exact_brep = true
+    )
+    |> tag::cylindrical_faces("spigot_pilot_od")
+
+    let cap_blank = boolean::union(items = [flange_disk, spigot_boss])
+        |> chamfer(d = 0.6mm)
+
+    let shaft_bore_tool = cylinder(
+        d = shaft_bore_d,
+        h = total_h + 2.0mm,
+        origin = [0.0mm, 0.0mm, -1.0mm],
+        exact_brep = true
+    )
+    |> tag::cylindrical_faces("shaft_clearance_bore")
+
+    let bearing_pocket_tool = cylinder(
+        d = bearing_pocket_d,
+        h = pocket_depth + 1.0mm,
+        origin = [0.0mm, 0.0mm, total_h - pocket_depth],
+        exact_brep = true
+    )
+    |> tag::cylindrical_faces("bearing_pocket_wall")
+
+    let bolt_circle_holes = hole::simple(
+        d = 5.5mm,
+        depth = flange_h + 2.0mm,
+        origin = [bolt_radius, 0.0mm, flange_h + 1.0mm]
+    )
+    |> array::polar(axis = Z_AXIS, radius = bolt_radius, count = bolt_count, start_angle = 45.0deg)
+    |> tag::faces("end_cap_bolt_holes")
+
+    let final_part = cap_blank
+        |> boolean::subtract(
+            tools = [shaft_bore_tool, bearing_pocket_tool, bolt_circle_holes],
+            preserve_exact_interfaces = true
+        )
+
+    let flange_datum = final_part.faces().planar().filter(normal = -Z).min_by(coord = Z)
+        |> pmi::datum("A", flatness = 0.015mm)
+    let pocket_surface = final_part.faces().tagged("bearing_pocket_wall")
+        |> pmi::perpendicularity(tol = 0.012mm, datum = "A")
+
+    assert::bbox(target = final_part, max_size = [92.0mm, 92.0mm, 18.0mm])
+    assert::dfm_accessible(target = final_part, axes = [+Z, -Z], min_wall_thickness = 2.5mm)
+
+    return final_part
+}

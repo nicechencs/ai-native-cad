@@ -210,6 +210,9 @@ struct MetricsJson {
     open_edge_count: usize,
     compile_time_ms: f64,
     kernel_backend: String,
+    kernel_authoritative: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kernel_fallback_reason: Option<String>,
     eval_path: &'static str,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     fallback_reasons: Vec<String>,
@@ -1326,6 +1329,14 @@ fn build_cli_json_with_telemetry(
             open_edge_count: eval.check_report.open_edge_count,
             compile_time_ms: (eval.compile_time_ms * 100.0).round() / 100.0,
             kernel_backend: eval.kernel_backend.clone(),
+            kernel_authoritative: matches!(eval.kernel_backend.as_str(), "occt" | "occt-ffi"),
+            kernel_fallback_reason: if matches!(eval.kernel_backend.as_str(), "occt" | "occt-ffi") {
+                None
+            } else if fallback_reasons.is_empty() {
+                Some("当前为解析预览内核，不是权威 OCCT B-Rep。".to_string())
+            } else {
+                Some(fallback_reasons.join("; "))
+            },
             eval_path: eval_path.as_str(),
             fallback_reasons,
         },
@@ -1385,6 +1396,8 @@ fn emit_io_error(file_str: &str, msg: &str, json: bool) -> ExitCode {
             open_edge_count: 0,
             compile_time_ms: 0.0,
             kernel_backend: "rust-brep-mvp".to_string(),
+            kernel_authoritative: false,
+            kernel_fallback_reason: Some("当前为解析预览内核，不是权威 OCCT B-Rep。".to_string()),
             eval_path: EvalPath::GraphEvaluator.as_str(),
             fallback_reasons: Vec::new(),
         },

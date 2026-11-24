@@ -106,6 +106,20 @@ export interface ClassifyAiRunInput {
  * Pure classification of an AI generation/edit response for both Web HTTP and Desktop Tauri native backends.
  * Never falls back to offline hardcoded templates; distinguishes honest UNKNOWN L4 verdicts from hard FAIL.
  */
+
+function aiRecoveryAction(kind: "config_error" | "error" | "offline_error"): { label: string; onClick: () => void } {
+  if (kind === "config_error") {
+    return {
+      label: "配置密钥",
+      onClick: () => window.dispatchEvent(new Event("aicad:open-ai-settings")),
+    };
+  }
+  return {
+    label: "重试",
+    onClick: () => window.dispatchEvent(new Event("aicad:retry-last-ai")),
+  };
+}
+
 export function classifyAiRunOutcome(input: ClassifyAiRunInput): AiRunOutcome {
   const {
     hasResponse,
@@ -718,7 +732,7 @@ export function useWorkbenchAi({
           }
         }
 
-        if (!isCurrent()) return;
+        if (!isCurrent()) return false;
         const aiTraceId = response
           ? readTraceId(response.headers.get("x-trace-id"), payload, "") || undefined
           : undefined;
@@ -746,9 +760,10 @@ export function useWorkbenchAi({
             title: outcome.title,
             detail: outcome.message,
             source: "AI",
+            action: aiRecoveryAction(outcome.kind),
             ...(aiTraceId ? { traceId: aiTraceId } : {}),
           });
-          return;
+          return false;
         }
 
         if (outcome.kind === "error") {
@@ -771,9 +786,10 @@ export function useWorkbenchAi({
               level: "warning",
               title: outcome.title,
               source: "AI",
+              action: aiRecoveryAction("error"),
               ...(aiTraceId ? { traceId: aiTraceId } : {}),
             });
-            return;
+            return false;
           }
           finishError({ status: "error", message: outcome.message });
           notify({
@@ -781,9 +797,10 @@ export function useWorkbenchAi({
             title: outcome.title,
             detail: outcome.message,
             source: "AI",
+            action: aiRecoveryAction("error"),
             ...(aiTraceId ? { traceId: aiTraceId } : {}),
           });
-          return;
+          return false;
         }
 
         aiRequest.current = null;
@@ -803,7 +820,7 @@ export function useWorkbenchAi({
             detail: `${outcome.preview.previewBranch} · ${outcome.detail}`,
             source: "AI",
           });
-          return;
+          return true;
         }
 
         const sourceToApply =
@@ -823,6 +840,7 @@ export function useWorkbenchAi({
           source: "AI",
           action: sourceUndoAction(undoRevision),
         });
+        return true;
       } catch (err) {
         if (!abort.signal.aborted && isCurrent()) {
           const msg = err instanceof Error ? err.message : String(err);
@@ -833,9 +851,11 @@ export function useWorkbenchAi({
             title: "AI 请求异常",
             detail: msg,
             source: "AI",
+            action: aiRecoveryAction("error"),
             ...(traceId ? { traceId } : {}),
           });
         }
+        return false;
       } finally {
         if (aiRequest.current === abort) {
           aiRequest.current = null;

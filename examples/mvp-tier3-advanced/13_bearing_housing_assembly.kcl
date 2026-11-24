@@ -1,0 +1,25 @@
+// Bearing housing and separate cover, each defined in local coordinates.
+@unit(length = "mm", angle = "deg", force = "N")
+@material("Al-6061-T6")
+
+part HousingBase(seat_d: Length = 26.0mm) -> Solid {
+    let stock = box(size = [52mm, 44mm, 22mm], origin = [-26mm, -22mm, 0mm])
+    let seat = cylinder(d = seat_d, h = 24mm, origin = [0mm, 0mm, -1mm], exact_brep = true)
+        |> tag::cylindrical_faces("bearing_seat")
+    return stock |> boolean::subtract(tools = [seat], preserve_exact_interfaces = true)
+}
+
+part HousingCap() -> Solid {
+    let cover = cylinder(d = 40mm, h = 6mm, origin = [0mm, 0mm, 0mm])
+    let clearance = cylinder(d = 20mm, h = 8mm, origin = [0mm, 0mm, -1mm], exact_brep = true)
+        |> tag::cylindrical_faces("shaft_clearance")
+    return cover |> boolean::subtract(tools = [clearance], preserve_exact_interfaces = true)
+}
+
+assembly BearingHousingAssembly() -> Assembly {
+    let base = component(part = HousingBase, origin = [0mm, 0mm, 0mm])
+    let cap = component(part = HousingCap, origin = [0mm, 0mm, 22mm], rotation = [0deg, 0deg, 0deg])
+    mate::coaxial(a = base, b = cap, axis = Z_AXIS)
+    mate::coincident(a = base, b = cap, offset = 0mm)
+    return [base, cap]
+}

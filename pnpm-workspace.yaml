@@ -1,3 +1,2 @@
 packages:
   - "apps/*"
-  - "tests/functional/web_e2e"

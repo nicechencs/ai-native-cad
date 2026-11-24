@@ -1,0 +1,2 @@
+# The KCL examples pin SHA-256 of the asset bytes. Do not rewrite line endings.
+assets/* -text

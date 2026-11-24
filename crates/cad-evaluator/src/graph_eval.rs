@@ -3763,6 +3763,214 @@ fn resolve_import_asset_format(
 
 /// Convert a `GraphEvaluator` evaluation report into the standard `EvaluationOutput`
 /// shared by `cad-cli` and the Tauri desktop host.
+
+/// Collect node ids referenced by an IR value (including nested lists/maps).
+fn collect_graph_node_refs(value: &IrValue, out: &mut BTreeSet<NodeId>) {
+    match value {
+        IrValue::NodeRef { node_id, .. } => {
+            out.insert(node_id.clone());
+        }
+        IrValue::List(items) => {
+            for item in items {
+                collect_graph_node_refs(item, out);
+            }
+        }
+        IrValue::Map(entries) => {
+            for item in entries.values() {
+                collect_graph_node_refs(item, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Solids consumed as inputs of any non-suppressed downstream node.
+fn consumed_finished_solid_ids(graph: &CanonicalGraph) -> BTreeSet<NodeId> {
+    let mut consumed = BTreeSet::new();
+    for node in graph.nodes.values() {
+        if matches!(node.state, NodeState::Suppressed) {
+            continue;
+        }
+        for value in node.inputs.values() {
+            collect_graph_node_refs(value, &mut consumed);
+        }
+    }
+    consumed
+}
+
+/// Finished (leaf) output ids in `graph.outputs` order.
+///
+/// Intermediate solids that appear in the feature outline but are consumed by a
+/// later feature (for example an uncut `block` consumed by `hole`) are omitted.
+/// If every listed output is consumed or the walk degenerates, fall back to every
+/// `graph.outputs` entry that produced a solid so evaluation still has a body.
+fn terminal_finished_output_ids<'a>(
+    graph: &'a CanonicalGraph,
+    report: &'a GraphEvalReport,
+) -> Vec<&'a NodeId> {
+    let consumed = consumed_finished_solid_ids(graph);
+    let terminals: Vec<&NodeId> = graph
+        .outputs
+        .iter()
+        .filter(|id| report.output_solids.contains_key(*id) && !consumed.contains(*id))
+        .collect();
+    if !terminals.is_empty() {
+        return terminals;
+    }
+    graph
+        .outputs
+        .iter()
+        .filter(|id| report.output_solids.contains_key(*id))
+        .collect()
+}
+
+fn kernel_backend_for_finished_solids(
+    solids: &[&SolidShape],
+    kernel: &dyn GeometryKernel,
+) -> String {
+    let mut has_occt = false;
+    let mut has_analytic = false;
+    let mut has_mesh = false;
+    for solid in solids {
+        match &solid.payload {
+            KernelPayload::Occt(_) => has_occt = true,
+            KernelPayload::Analytic => has_analytic = true,
+            KernelPayload::TriMesh => has_mesh = true,
+        }
+    }
+    let distinct = usize::from(has_occt) + usize::from(has_analytic) + usize::from(has_mesh);
+    if distinct > 1 {
+        "mixed-multibody".to_owned()
+    } else if has_occt {
+        "occt-ffi".to_owned()
+    } else {
+        kernel.backend_name().to_owned()
+    }
+}
+
+fn evaluation_output_from_finished_solids(
+    graph: &CanonicalGraph,
+    report: &GraphEvalReport,
+    terminal_ids: &[&NodeId],
+    diagnostics: Vec<Diagnostic>,
+    kernel: &dyn GeometryKernel,
+    compile_time_ms: f64,
+) -> EvaluationOutput {
+    let mut diagnostics = diagnostics;
+    let mut group_solid = SolidShape::empty(&graph.graph_id);
+    let mut csg_items = Vec::with_capacity(terminal_ids.len());
+    let mut component_solids = HashMap::new();
+    let mut grouped = CheckReport {
+        watertight: !terminal_ids.is_empty(),
+        volume_mm3: 0.0,
+        surface_area_mm2: 0.0,
+        bbox_mm: BBox3::empty(),
+        face_count: 0,
+        edge_count: 0,
+        open_edge_count: 0,
+        issues: Vec::new(),
+    };
+    let mut member_refs: Vec<&SolidShape> = Vec::with_capacity(terminal_ids.len());
+
+    for out_id in terminal_ids {
+        let Some(source) = report.output_solids.get(*out_id) else {
+            continue;
+        };
+        member_refs.push(source);
+        let mut placed = source.clone();
+        let part_name = graph
+            .nodes
+            .get(&out_id.0)
+            .map(|node| node.name.clone())
+            .filter(|name| !name.is_empty())
+            .or_else(|| (!source.part_name.is_empty()).then(|| source.part_name.clone()))
+            .unwrap_or_else(|| out_id.0.clone());
+        placed.part_name = part_name.clone();
+        let cid = out_id.0.clone();
+        for face in &mut placed.faces {
+            face.component_id = Some(cid.clone());
+            face.face_id = format!("{cid}_{}", face.face_id);
+        }
+        for edge in &mut placed.edges {
+            edge.component_id = Some(cid.clone());
+            edge.edge_id = format!("{cid}_{}", edge.edge_id);
+        }
+        let chk = report
+            .output_checks
+            .get(*out_id)
+            .cloned()
+            .unwrap_or_else(|| kernel.check_solid(&placed));
+        grouped.watertight &= chk.watertight;
+        grouped.volume_mm3 += chk.volume_mm3;
+        grouped.surface_area_mm2 += chk.surface_area_mm2;
+        grouped.bbox_mm = grouped.bbox_mm.union(chk.bbox_mm);
+        grouped.face_count += chk.face_count;
+        grouped.edge_count += chk.edge_count;
+        grouped.open_edge_count += chk.open_edge_count;
+        grouped
+            .issues
+            .extend(chk.issues.iter().map(|issue| format!("{cid}: {issue}")));
+        if !chk.watertight && !is_imported_preview(source) {
+            diagnostics.push(Diagnostic {
+                code: "E301_NON_WATERTIGHT".to_owned(),
+                severity: Severity::Error,
+                message: format!(
+                    "solid `{cid}` failed watertight check: {:?}",
+                    chk.issues
+                ),
+                span: Span::default(),
+            });
+        }
+        group_solid.components.push(ComponentMeta {
+            component_id: cid.clone(),
+            part_name,
+            origin_mm: [0.0; 3],
+            rotation_deg: [0.0; 3],
+            volume_mm3: chk.volume_mm3,
+            bbox_mm: chk.bbox_mm,
+        });
+        component_solids.insert(cid, source.clone());
+        group_solid.exact_brep &= placed.exact_brep;
+        csg_items.push(placed.csg);
+        group_solid.faces.extend(placed.faces);
+        group_solid.edges.extend(placed.edges);
+        group_solid.pmi.extend(placed.pmi);
+    }
+    group_solid.csg = CsgNode::Union(csg_items);
+    group_solid.payload = KernelPayload::Analytic;
+    group_solid.part_name = graph.graph_id.clone();
+
+    let preview_only = !grouped.watertight
+        && member_refs.iter().all(|solid| is_imported_preview(solid));
+    if !grouped.watertight && !preview_only && !diagnostics.iter().any(|d| d.code == "E301_NON_WATERTIGHT")
+    {
+        diagnostics.push(Diagnostic {
+            code: "E301_NON_WATERTIGHT".to_owned(),
+            severity: Severity::Error,
+            message: format!(
+                "solid `{}` failed watertight check: {:?}",
+                graph.graph_id, grouped.issues
+            ),
+            span: Span::default(),
+        });
+    }
+    let status_ok = !diagnostics.iter().any(|d| d.severity == Severity::Error);
+    let scene_mesh = build_scene_mesh(&group_solid, Vec::new());
+    let kernel_backend = kernel_backend_for_finished_solids(&member_refs, kernel);
+    EvaluationOutput {
+        status_ok,
+        part_name: graph.graph_id.clone(),
+        is_assembly: true,
+        diagnostics,
+        check_report: grouped,
+        solid: group_solid,
+        component_solids,
+        scene_mesh,
+        compile_time_ms,
+        kernel_backend,
+    }
+}
+
 pub fn graph_report_to_evaluation_output(
     graph: &CanonicalGraph,
     report: GraphEvalReport,
@@ -3963,10 +4171,21 @@ pub fn graph_report_to_evaluation_output(
         };
     }
 
-    let Some((out_id, mut solid)) = graph
-        .outputs
+    let terminal_ids = terminal_finished_output_ids(graph, &report);
+    if terminal_ids.len() > 1 {
+        return evaluation_output_from_finished_solids(
+            graph,
+            &report,
+            &terminal_ids,
+            diagnostics,
+            kernel,
+            compile_time_ms,
+        );
+    }
+
+    let Some((out_id, mut solid)) = terminal_ids
         .first()
-        .and_then(|id| report.output_solids.get(id).map(|s| (id, s.clone())))
+        .and_then(|id| report.output_solids.get(*id).map(|s| (*id, s.clone())))
     else {
         if !diagnostics.iter().any(|d| d.severity == Severity::Error) {
             diagnostics.push(Diagnostic {

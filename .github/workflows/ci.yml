@@ -1,0 +1,104 @@
+name: Public Snapshot CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  rust-and-examples:
+    name: Rust Build & Example Models
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check Rust workspace
+        run: cargo check --workspace --locked
+      - name: Build cad-cli
+        run: cargo build -p cad-cli --locked
+      - name: Verify KCL golden examples
+        run: |
+          python3 - <<'PY'
+          import json, subprocess, sys
+          from pathlib import Path
+
+          cli = Path("target/debug/cad-cli")
+          files = sorted(
+              list(Path("examples/mvp-tier1-plates").glob("*.kcl"))
+              + list(Path("examples/mvp-tier2-brackets").glob("*.kcl"))
+              + list(Path("examples/mvp-tier3-advanced").glob("*.kcl"))
+          )
+          assert files, "No KCL examples found"
+          for kcl in files:
+              proc = subprocess.run([str(cli), "check", str(kcl), "--json"], capture_output=True, text=True)
+              data = json.loads(proc.stdout)
+              if kcl.name == "05_bearing_end_cap.kcl":
+                  # Chamfer on a boolean union requires --features occt-ffi; pure Rust must report E205 honestly.
+                  codes = {d.get("code") for d in data.get("diagnostics", [])}
+                  assert proc.returncode != 0 and "E205_INVALID_FILLET_CHAMFER" in codes, f"{kcl}: {data}"
+                  print(f"OK   {kcl} (OCCT-only chamfer honestly reported)")
+                  continue
+              if proc.returncode != 0 or data.get("status") != "ok":
+                  print(f"FAIL {kcl}: {proc.stdout}\n{proc.stderr}", file=sys.stderr)
+                  sys.exit(1)
+              print(f"OK   {kcl}")
+          PY
+      - name: Verify .aicad sample projects & Python SDK examples
+        run: |
+          python3 examples/aicad-projects/generate_samples.py --check
+          python3 - <<'PY'
+          import json, subprocess, sys, tempfile
+          from pathlib import Path
+
+          cli = Path("target/debug/cad-cli").resolve()
+          for proj in sorted(Path("examples/aicad-projects").glob("*.aicad")):
+              proc = subprocess.run([str(cli), "project", "inspect", str(proj), "--json"], capture_output=True, text=True)
+              if proc.returncode != 0:
+                  print(f"FAIL inspect {proj}: {proc.stdout}\n{proc.stderr}", file=sys.stderr)
+                  sys.exit(1)
+              print(f"OK   inspect {proj}")
+              emit = subprocess.run([str(cli), "project", "emit-kcl", str(proj)], capture_output=True, text=True)
+              if emit.returncode != 0 or not emit.stdout.strip():
+                  print(f"FAIL emit-kcl {proj}: {emit.stderr}", file=sys.stderr)
+                  sys.exit(1)
+              print(f"OK   emit-kcl {proj}")
+
+          for script in sorted(Path("examples/developer-platform").glob("0*.py")):
+              with tempfile.TemporaryDirectory() as tmp:
+                  proc = subprocess.run(
+                      [sys.executable, str(script), "--cad-cli", str(cli), "--work-dir", tmp],
+                      capture_output=True,
+                      text=True,
+                  )
+                  if proc.returncode != 0:
+                      print(f"FAIL {script}: {proc.stdout}\n{proc.stderr}", file=sys.stderr)
+                      sys.exit(1)
+                  json.loads(proc.stdout)
+                  print(f"OK   {script}")
+          PY
+      - name: Verify Tier 4 fixture hashes
+        run: python3 examples/mvp-tier4-import/generate_fixtures.py --check
+
+  frontend-build:
+    name: Studio UI Typecheck & Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.4.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+      - run: pnpm install
+      - run: pnpm typecheck
+      - run: pnpm build

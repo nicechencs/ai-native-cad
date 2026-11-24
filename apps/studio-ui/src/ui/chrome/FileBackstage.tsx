@@ -169,6 +169,8 @@ export function FileBackstage({
               <div className="backstage-grid">
                 {renderActionCard("file.loadSource", "载入 KCL 源码…", "从本地打开 .kcl 文件并投影至当前工程", "code")}
                 {renderActionCard("file.downloadSource", "保存 / 下载 KCL 源码", "导出当前 1:1 声明式 KCL 源码视图", "export", true)}
+                {renderActionCard("file.openAicad", "打开 .aicad 工程…", "打开本地 .aicad 工程并恢复完整多体与建模历史", "code")}
+                {renderActionCard("file.saveAicad", "保存 .aicad 工程", "原地保存当前工程图并保留 oplog 与建模分支历史", "export")}
                 {renderActionCard("file.importAsset", "导入外部 3D 资产…", "支持 STEP / IGES / BREP / STL / 3MF / OBJ / GLB", "assetImport")}
                 {renderActionCard("model.regenerate", "重建与 L0–L4 验证", "重新评估特征图并刷新五层三值工程门禁", "refresh")}
                 {renderActionCard("file.resetDemo", "载入默认样板（法兰轴承座）", "将当前工程重置为默认参数化机械样板（可撤销）", "cube")}

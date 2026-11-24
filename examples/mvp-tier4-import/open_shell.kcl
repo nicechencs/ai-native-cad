@@ -1,0 +1,8 @@
+// Negative example: expected E505.
+@unit(length = "mm", angle = "deg", force = "N")
+part OpenShellImport() -> Solid {
+    return import::mesh(
+        path = "assets/open_shell.stl",
+        sha256 = "5a648c71665308f793772a47fe5631393f3de309a95973e2a363d3461cd5b9b6"
+    )
+}

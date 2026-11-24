@@ -40,7 +40,7 @@ export interface AiAssistantPanelProps {
     manufacturingMethod: string,
     options?: AiRequestOptions,
     contextLabel?: string,
-  ) => void | Promise<void>;
+  ) => void | boolean | Promise<void | boolean>;
   readonly onCancel?: () => void;
   readonly onUndoLast?: () => void;
   readonly canUndo?: boolean;
@@ -174,6 +174,10 @@ export function AiAssistantPanel({
   const handleSubmit = (overridePrompt?: string, overrideMode?: AiGenerateMode) => {
     const rawPrompt = (overridePrompt ?? prompt).trim();
     if (generating || !rawPrompt) return;
+    if (!aiStatus.ready) {
+      setSettingsOpen(true);
+      return;
+    }
     const effectiveMode = overrideMode ?? mode;
     const payload = buildPointAndPromptPayload({
       prompt: rawPrompt,
@@ -183,22 +187,37 @@ export function AiAssistantPanel({
       selectedNodeIds,
     });
     const llm = buildLlmConfigFromProfile(activeProfile, storageKind);
-    void onGenerate(
-      payload.prompt,
-      materialId,
-      method,
-      {
-        mode: effectiveMode,
-        llm,
-        selectedTopoRefs: payload.selectedTopoRefs,
-        selectedNodeIds: payload.selectedNodeIds,
-      },
-      selectionContextLabel,
-    );
-    if (!overridePrompt) {
-      setPrompt("");
-    }
+    void Promise.resolve(
+      onGenerate(
+        payload.prompt,
+        materialId,
+        method,
+        {
+          mode: effectiveMode,
+          llm,
+          selectedTopoRefs: payload.selectedTopoRefs,
+          selectedNodeIds: payload.selectedNodeIds,
+        },
+        selectionContextLabel,
+      ),
+    ).then((ok) => {
+      if (ok && !overridePrompt) setPrompt("");
+    });
   };
+
+  useEffect(() => {
+    const openSettings = () => setSettingsOpen(true);
+    const retryLast = () => {
+      const lastError = [...thread].reverse().find((item) => item.status === "error" && item.prompt.trim());
+      if (lastError) handleSubmit(lastError.prompt, lastError.mode);
+    };
+    window.addEventListener("aicad:open-ai-settings", openSettings);
+    window.addEventListener("aicad:retry-last-ai", retryLast);
+    return () => {
+      window.removeEventListener("aicad:open-ai-settings", openSettings);
+      window.removeEventListener("aicad:retry-last-ai", retryLast);
+    };
+  }, [thread, generating, materialId, method, mode, attachSelection, selectedTarget, selectedTopoRefs, selectedNodeIds, activeProfile, storageKind]);
 
   return (
     <section className="ai-copilot-shell" aria-label="AI 建模助手">
@@ -345,6 +364,8 @@ export function AiAssistantPanel({
                     item={item}
                     canUndo={canUndoThis}
                     onUndo={onUndoLast}
+                    onRetry={() => handleSubmit(item.prompt, item.mode)}
+                    onConfigure={() => setSettingsOpen(true)}
                   />
                 </article>
               );
