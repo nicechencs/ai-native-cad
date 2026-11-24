@@ -1,0 +1,219 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-native-cad.local/schemas/graph-ir.schema.json",
+  "title": "Canonical Graph IR",
+  "description": "Versioned, deterministic graph representation for the AI-Native CAD hybrid geometry and field tracks.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["graph_id", "units", "parameters", "blobs", "nodes", "outputs"],
+  "properties": {
+    "ir_schema_version": { "type": "integer", "minimum": 0, "maximum": 4294967295, "default": 1 },
+    "graph_id": { "$ref": "#/$defs/nonempty_string" },
+    "units": { "$ref": "#/$defs/unit_system" },
+    "parameters": { "$ref": "#/$defs/parameter_map" },
+    "blobs": { "$ref": "#/$defs/blob_map" },
+    "external_refs": { "$ref": "#/$defs/external_ref_map" },
+    "nodes": { "$ref": "#/$defs/node_map" },
+    "outputs": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/node_id" } }
+  },
+  "$defs": {
+    "nonempty_string": { "type": "string", "pattern": "\\S" },
+    "node_id": { "$ref": "#/$defs/nonempty_string" },
+    "external_ref_id": { "$ref": "#/$defs/nonempty_string" },
+    "unit_system": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["length", "angle", "force", "pressure", "mass"],
+      "properties": {
+        "length": { "enum": ["mm", "m", "in", "um", "cm"] },
+        "angle": { "enum": ["deg", "rad"] },
+        "force": { "enum": ["N", "kN"] },
+        "pressure": { "enum": ["MPa", "Pa"] },
+        "mass": { "enum": ["g", "kg"] }
+      }
+    },
+    "quantity": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["dimension", "value", "unit"],
+          "properties": {
+            "dimension": { "const": "length" },
+            "value": { "type": "number" },
+            "unit": { "enum": ["mm", "m", "in", "um", "cm"] }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["dimension", "value", "unit"],
+          "properties": {
+            "dimension": { "const": "angle" },
+            "value": { "type": "number" },
+            "unit": { "enum": ["deg", "rad"] }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["dimension", "value", "unit"],
+          "properties": {
+            "dimension": { "const": "force" },
+            "value": { "type": "number" },
+            "unit": { "enum": ["N", "kN"] }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["dimension", "value", "unit"],
+          "properties": {
+            "dimension": { "const": "pressure" },
+            "value": { "type": "number" },
+            "unit": { "enum": ["MPa", "Pa"] }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["dimension", "value", "unit"],
+          "properties": {
+            "dimension": { "const": "mass" },
+            "value": { "type": "number" },
+            "unit": { "enum": ["g", "kg"] }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["dimension", "value"],
+          "properties": {
+            "dimension": { "const": "density" },
+            "value": { "type": "number", "description": "Density in kilograms per cubic metre." }
+          }
+        }
+      ]
+    },
+    "ir_type": {
+      "type": "string",
+      "enum": [
+        "scalar", "int", "bool", "string", "length", "angle", "force", "pressure", "mass", "density",
+        "vec2_length", "vec3_length", "vec3_dir", "solid", "surface", "subd", "scalar_field", "vector_field",
+        "sketch", "assembly", "component", "topo_ref", "blob_ref", "external_ref"
+      ]
+    },
+    "vec3": {
+      "type": "array", "prefixItems": [{ "type": "number" }, { "type": "number" }, { "type": "number" }],
+      "items": false, "minItems": 3, "maxItems": 3
+    },
+    "node_ref": {
+      "type": "object", "additionalProperties": false, "required": ["node_id", "port"],
+      "properties": { "node_id": { "$ref": "#/$defs/node_id" }, "port": { "const": "out" } }
+    },
+    "ir_value": {
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["type", "value"], "properties": { "type": { "const": "quantity" }, "value": { "$ref": "#/$defs/quantity" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "value"], "properties": { "type": { "const": "scalar" }, "value": { "type": "number" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "value"], "properties": { "type": { "const": "int" }, "value": { "type": "integer", "minimum": -9223372036854775808, "maximum": 9223372036854775807 } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "value"], "properties": { "type": { "const": "bool" }, "value": { "type": "boolean" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "value"], "properties": { "type": { "const": "string" }, "value": { "type": "string" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "value"], "properties": { "type": { "const": "vec3" }, "value": { "$ref": "#/$defs/vec3" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "value"], "properties": { "type": { "const": "node_ref" }, "value": { "$ref": "#/$defs/node_ref" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "value"], "properties": { "type": { "const": "blob_ref" }, "value": { "$ref": "#/$defs/nonempty_string" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "value"], "properties": { "type": { "const": "external_ref" }, "value": { "$ref": "#/$defs/external_ref_id" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "value"], "properties": { "type": { "const": "topo_ref_expr" }, "value": { "type": "string" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "value"], "properties": { "type": { "const": "list" }, "value": { "type": "array", "items": { "$ref": "#/$defs/ir_value" } } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "value"], "properties": { "type": { "const": "map" }, "value": { "type": "object", "additionalProperties": { "$ref": "#/$defs/ir_value" } } } }
+      ]
+    },
+    "payload_policy": {
+      "type": "string",
+      "enum": ["eager", "deferred_payload"],
+      "default": "eager"
+    },
+    "external_ref_def": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref_id", "container_path"],
+      "properties": {
+        "ref_id": { "$ref": "#/$defs/external_ref_id" },
+        "container_path": { "$ref": "#/$defs/nonempty_string" },
+        "expected_sha256": {
+          "oneOf": [
+            { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
+            { "type": "null" }
+          ]
+        },
+        "target_graph_id": {
+          "oneOf": [
+            { "$ref": "#/$defs/nonempty_string" },
+            { "type": "null" }
+          ]
+        },
+        "payload_policy": { "$ref": "#/$defs/payload_policy" },
+        "overrides": {
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/nonempty_string" },
+          "additionalProperties": { "$ref": "#/$defs/ir_value" }
+        }
+      }
+    },
+    "external_ref_map": {
+      "type": "object",
+      "propertyNames": { "$ref": "#/$defs/external_ref_id" },
+      "additionalProperties": { "$ref": "#/$defs/external_ref_def" }
+    },
+    "parameter": {
+      "type": "object", "additionalProperties": false, "required": ["name", "ir_type", "value"],
+      "properties": {
+        "name": { "$ref": "#/$defs/nonempty_string" },
+        "ir_type": { "$ref": "#/$defs/ir_type" },
+        "value": { "$ref": "#/$defs/ir_value" },
+        "formula": { "type": ["string", "null"] }
+      }
+    },
+    "parameter_map": { "type": "object", "propertyNames": { "$ref": "#/$defs/nonempty_string" }, "additionalProperties": { "$ref": "#/$defs/parameter" } },
+    "blob_entry": {
+      "type": "object", "additionalProperties": false, "required": ["handle", "kind", "sha256", "byte_len", "relative_path"],
+      "properties": {
+        "handle": { "$ref": "#/$defs/nonempty_string" },
+        "kind": { "enum": ["spline", "subd", "field", "import"] },
+        "sha256": { "type": "string" },
+        "byte_len": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+        "relative_path": { "type": "string" }
+      }
+    },
+    "blob_map": { "type": "object", "propertyNames": { "$ref": "#/$defs/nonempty_string" }, "additionalProperties": { "$ref": "#/$defs/blob_entry" } },
+    "node_kind": {
+      "oneOf": [
+        { "$ref": "#/$defs/unit_node_kind" },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "param_id"], "properties": { "kind": { "const": "parameter_ref" }, "param_id": { "$ref": "#/$defs/nonempty_string" } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "family"], "properties": { "kind": { "const": "field_tpms" }, "family": { "enum": ["gyroid", "schwarz_p", "diamond", "lidinoid"] } } }
+      ]
+    },
+    "unit_node_kind": {
+      "type": "object", "additionalProperties": false, "required": ["kind"],
+      "properties": { "kind": { "enum": [
+        "sketch_2d", "primitive_box", "primitive_cylinder", "extrude", "revolve", "sweep", "loft_guided", "shell", "fillet", "chamfer", "draft", "mirror", "pattern_linear", "pattern_polar", "boolean_union", "boolean_subtract", "boolean_intersect", "hole", "direct_face_edit", "surface_boundary", "surface_trim", "surface_knit_to_solid", "subd_from_blob", "subd_to_nurbs", "field_sdf", "field_ramp", "field_from_fea_blob", "implicit_smooth_blend", "implicit_lattice_infill", "std_lib_call", "import_asset", "assembly_component", "assembly_mate", "tag_faces", "assert_gate"
+      ] } }
+    },
+    "node_state": {
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["status"], "properties": { "status": { "const": "valid" } } },
+        { "type": "object", "additionalProperties": false, "required": ["status", "reason", "failed_topo_refs"], "properties": { "status": { "const": "failed_with_rollback" }, "reason": { "type": "string" }, "failed_topo_refs": { "type": "array", "items": { "type": "string" } } } },
+        { "type": "object", "additionalProperties": false, "required": ["status"], "properties": { "status": { "const": "suppressed" } } },
+        { "type": "object", "additionalProperties": false, "required": ["status"], "properties": { "status": { "const": "stale" } } }
+      ]
+    },
+    "node": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "name", "kind", "inputs", "output_type", "state", "metadata"],
+      "properties": {
+        "id": { "$ref": "#/$defs/node_id" },
+        "name": { "type": "string" },
+        "kind": { "$ref": "#/$defs/node_kind" },
+        "inputs": { "type": "object", "additionalProperties": { "$ref": "#/$defs/ir_value" } },
+        "output_type": { "$ref": "#/$defs/ir_type" },
+        "state": { "$ref": "#/$defs/node_state" },
+        "kernel_op_version": { "type": ["string", "null"] },
+        "metadata": { "type": "object", "additionalProperties": { "type": "string" } }
+      }
+    },
+    "node_map": { "type": "object", "propertyNames": { "$ref": "#/$defs/node_id" }, "additionalProperties": { "$ref": "#/$defs/node" } }
+  }
+}

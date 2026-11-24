@@ -1,0 +1,208 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-native-cad.local/schemas/verification-report.schema.json",
+  "title": "Engineering Verification Report",
+  "description": "Five-layer tri-state (PASS / FAIL / UNKNOWN) zero-trust verification report emitted by the CAD verification engine and critic.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "overall_status",
+    "kernel_identity",
+    "layers",
+    "checks"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 1,
+      "description": "Verification report schema version."
+    },
+    "overall_status": {
+      "$ref": "#/$defs/tri_verdict",
+      "description": "Aggregated tri-state verdict across all five layers: any FAIL -> FAIL; else any UNKNOWN -> UNKNOWN; all PASS -> PASS."
+    },
+    "kernel_identity": {
+      "$ref": "#/$defs/kernel_identity",
+      "description": "Metadata identifying the geometry kernel that produced the evaluated B-Rep and topology."
+    },
+    "layers": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "L0_structure_units",
+        "L1_geometry_topology",
+        "L2_interfaces_constraints",
+        "L3_manufacturability_physics",
+        "L4_interop_roundtrip"
+      ],
+      "properties": {
+        "L0_structure_units": { "$ref": "#/$defs/tri_verdict" },
+        "L1_geometry_topology": { "$ref": "#/$defs/tri_verdict" },
+        "L2_interfaces_constraints": { "$ref": "#/$defs/tri_verdict" },
+        "L3_manufacturability_physics": { "$ref": "#/$defs/tri_verdict" },
+        "L4_interop_roundtrip": { "$ref": "#/$defs/tri_verdict" }
+      }
+    },
+    "checks": {
+      "type": "array",
+      "description": "Individual verification checks with deterministic evidence.",
+      "items": {
+        "$ref": "#/$defs/verification_check"
+      }
+    },
+    "summary": {
+      "type": ["string", "null"],
+      "description": "Optional human-readable summary of the verification report."
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "overall_status": { "const": "PASS" }
+        },
+        "required": ["overall_status"]
+      },
+      "then": {
+        "properties": {
+          "layers": {
+            "properties": {
+              "L0_structure_units": { "const": "PASS" },
+              "L1_geometry_topology": { "const": "PASS" },
+              "L2_interfaces_constraints": { "const": "PASS" },
+              "L3_manufacturability_physics": { "const": "PASS" },
+              "L4_interop_roundtrip": { "const": "PASS" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "overall_status": { "const": "UNKNOWN" }
+        },
+        "required": ["overall_status"]
+      },
+      "then": {
+        "allOf": [
+          {
+            "properties": {
+              "layers": {
+                "properties": {
+                  "L0_structure_units": { "enum": ["PASS", "UNKNOWN"] },
+                  "L1_geometry_topology": { "enum": ["PASS", "UNKNOWN"] },
+                  "L2_interfaces_constraints": { "enum": ["PASS", "UNKNOWN"] },
+                  "L3_manufacturability_physics": { "enum": ["PASS", "UNKNOWN"] },
+                  "L4_interop_roundtrip": { "enum": ["PASS", "UNKNOWN"] }
+                }
+              }
+            }
+          },
+          {
+            "properties": {
+              "layers": {
+                "anyOf": [
+                  { "properties": { "L0_structure_units": { "const": "UNKNOWN" } } },
+                  { "properties": { "L1_geometry_topology": { "const": "UNKNOWN" } } },
+                  { "properties": { "L2_interfaces_constraints": { "const": "UNKNOWN" } } },
+                  { "properties": { "L3_manufacturability_physics": { "const": "UNKNOWN" } } },
+                  { "properties": { "L4_interop_roundtrip": { "const": "UNKNOWN" } } }
+                ]
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "overall_status": { "const": "FAIL" }
+        },
+        "required": ["overall_status"]
+      },
+      "then": {
+        "properties": {
+          "layers": {
+            "anyOf": [
+              { "properties": { "L0_structure_units": { "const": "FAIL" } } },
+              { "properties": { "L1_geometry_topology": { "const": "FAIL" } } },
+              { "properties": { "L2_interfaces_constraints": { "const": "FAIL" } } },
+              { "properties": { "L3_manufacturability_physics": { "const": "FAIL" } } },
+              { "properties": { "L4_interop_roundtrip": { "const": "FAIL" } } }
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "tri_verdict": {
+      "type": "string",
+      "enum": ["PASS", "FAIL", "UNKNOWN"]
+    },
+    "verification_layer": {
+      "type": "string",
+      "enum": [
+        "L0_structure_units",
+        "L1_geometry_topology",
+        "L2_interfaces_constraints",
+        "L3_manufacturability_physics",
+        "L4_interop_roundtrip"
+      ]
+    },
+    "kernel_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "version", "authoritative"],
+      "properties": {
+        "provider": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Geometry kernel provider identifier (e.g. 'occt')."
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Kernel version string (e.g. '7.9.0')."
+        },
+        "authoritative": {
+          "type": "boolean",
+          "description": "True when the kernel is an authoritative B-Rep engine capable of exact topology and STEP AP242 evaluation."
+        }
+      }
+    },
+    "verification_check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "layer", "status", "message", "evidence"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Stable verification rule code (e.g. 'L0_SYNTAX_UNITS', 'L1_WATERTIGHT_SOLID', 'L3_LOADS_NO_FEA_SOLVER')."
+        },
+        "layer": {
+          "$ref": "#/$defs/verification_layer"
+        },
+        "status": {
+          "$ref": "#/$defs/tri_verdict"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Human-readable check outcome explanation."
+        },
+        "evidence": {
+          "type": "object",
+          "additionalProperties": true,
+          "default": {},
+          "description": "Structured compiler, B-Rep, DFM, or interop evidence payload."
+        }
+      }
+    }
+  }
+}

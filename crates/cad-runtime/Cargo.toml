@@ -1,0 +1,31 @@
+[package]
+name = "cad-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Stateful CAD document runtime: sessions, optimistic concurrency, undo/redo, and branch preview."
+
+[features]
+occt-ffi = ["cad-kernel-occt/occt-ffi", "cad-evaluator/occt-ffi"]
+wgpu-compute = ["cad-gpu-compute/wgpu-compute"]
+
+[dependencies]
+cad-api.workspace = true
+cad-container.workspace = true
+cad-evaluator.workspace = true
+cad-gpu-compute.workspace = true
+cad-ir.workspace = true
+cad-kcl-bridge.workspace = true
+cad-kernel-occt.workspace = true
+cad-mesh-io.workspace = true
+cad-render.workspace = true
+cad-scene-mesh.workspace = true
+cad-stdlib.workspace = true
+cad-topo.workspace = true
+getrandom = "0.4"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+cad-syntax.workspace = true

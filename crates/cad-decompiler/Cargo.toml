@@ -1,0 +1,22 @@
+[package]
+name = "cad-decompiler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+occt-ffi = ["cad-kernel-occt/occt-ffi"]
+
+[dependencies]
+cad-container.workspace = true
+cad-evaluator.workspace = true
+cad-ir.workspace = true
+cad-kcl-bridge.workspace = true
+cad-kernel-occt.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+cad-syntax.workspace = true

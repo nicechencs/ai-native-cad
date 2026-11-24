@@ -1,14 +1,32 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/cad-ir",
+    "crates/cad-topo",
+    "crates/cad-container",
+    "crates/cad-stdlib",
+    "crates/cad-kcl-bridge",
+    "crates/cad-implicit",
+    "crates/cad-slicer",
+    "crates/cad-subd",
+    "crates/cad-assembly-solver",
+    "crates/cad-cadpack",
+    "crates/cad-gpu-compute",
     "crates/cad-syntax",
     "crates/cad-hir",
     "crates/cad-gcs",
     "crates/cad-kernel-occt",
+    "crates/cad-decompiler",
+    "crates/cad-mesh-io",
+    "crates/cad-scene-mesh",
     "crates/cad-evaluator",
     "crates/cad-render",
     "crates/cad-lsp",
     "crates/cad-cli",
+    "crates/cad-observe",
+    "crates/cad-api",
+    "crates/cad-runtime",
+    "crates/cad-mcp",
 ]
 
 [workspace.package]
@@ -24,10 +42,29 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"
 
+cad-ir = { path = "crates/cad-ir" }
+cad-topo = { path = "crates/cad-topo" }
+cad-container = { path = "crates/cad-container" }
+cad-stdlib = { path = "crates/cad-stdlib" }
+cad-kcl-bridge = { path = "crates/cad-kcl-bridge" }
+cad-implicit = { path = "crates/cad-implicit" }
+cad-slicer = { path = "crates/cad-slicer" }
+cad-subd = { path = "crates/cad-subd" }
+cad-assembly-solver = { path = "crates/cad-assembly-solver" }
+cad-cadpack = { path = "crates/cad-cadpack" }
+cad-gpu-compute = { path = "crates/cad-gpu-compute" }
 cad-syntax = { path = "crates/cad-syntax" }
 cad-hir = { path = "crates/cad-hir" }
 cad-gcs = { path = "crates/cad-gcs" }
 cad-kernel-occt = { path = "crates/cad-kernel-occt" }
+cad-mesh-io = { path = "crates/cad-mesh-io" }
+cad-scene-mesh = { path = "crates/cad-scene-mesh" }
 cad-evaluator = { path = "crates/cad-evaluator" }
 cad-render = { path = "crates/cad-render" }
 cad-lsp = { path = "crates/cad-lsp" }
+cad-observe = { path = "crates/cad-observe" }
+cad-api = { path = "crates/cad-api" }
+cad-runtime = { path = "crates/cad-runtime" }
+cad-mcp = { path = "crates/cad-mcp" }
+tracing = { version = "0.1", default-features = false, features = ["std"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "registry", "env-filter"] }

@@ -8,14 +8,37 @@ license.workspace = true
 name = "cad-cli"
 path = "src/main.rs"
 
+[features]
+occt-ffi = ["cad-kernel-occt/occt-ffi", "cad-evaluator/occt-ffi", "cad-runtime/occt-ffi", "cad-decompiler/occt-ffi"]
+wgpu-renderer = ["cad-render/wgpu-renderer"]
+
 [dependencies]
 anyhow.workspace = true
-cad-evaluator.workspace = true
+cad-api.workspace = true
+cad-cadpack.workspace = true
+cad-container.workspace = true
+cad-decompiler = { path = "../cad-decompiler" }
+cad-evaluator = { workspace = true, features = ["experimental"] }
+cad-gpu-compute.workspace = true
 cad-hir.workspace = true
+cad-implicit.workspace = true
+cad-ir.workspace = true
+cad-kcl-bridge.workspace = true
 cad-kernel-occt.workspace = true
 cad-lsp.workspace = true
+cad-mcp.workspace = true
+cad-mesh-io.workspace = true
+cad-observe = { workspace = true, features = ["sink"] }
 cad-render.workspace = true
+cad-runtime.workspace = true
+cad-slicer.workspace = true
+cad-stdlib.workspace = true
 cad-syntax.workspace = true
+cad-topo.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+cad-subd.workspace = true

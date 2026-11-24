@@ -1,0 +1,16 @@
+[package]
+name = "cad-observe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Runtime observability contract: error codes, trace ids, redaction and an optional JSONL file sink"
+
+[features]
+default = []
+# Opt-in JSONL file sink; only process entry points (cad-cli, desktop) enable it.
+sink = ["dep:tracing-subscriber", "dep:serde_json"]
+
+[dependencies]
+tracing.workspace = true
+tracing-subscriber = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }

@@ -6,6 +6,9 @@ use std::fmt::Write;
 type Point = [f64; 2];
 type Key = (i64, i64);
 const EPS: f64 = 1e-7;
+/// Same bound as `OcctImportOptions::linear_deflection_mm`. Tessellated faces
+/// do not share vertices exactly; a larger gap is still an open profile.
+const PROFILE_SNAP_MM: f64 = 0.05;
 
 /// Exports a 1:1 XY cut projection in millimetres. Blind pockets and hidden edges
 /// are not through-cuts: the profiles bound the union of the projected solid faces.
@@ -30,33 +33,24 @@ pub fn render_dxf(shape: &SolidShape, check: &CheckReport) -> Result<String, Str
         .filter_map(|ring| horizontal_circle(ring));
     let circles: Vec<_> = edge_circles.chain(wall_circles).collect();
 
-    let mut out = String::new();
-    out.push_str("0\nSECTION\n2\nHEADER\n9\n$ACADVER\n1\nAC1015\n9\n$INSUNITS\n70\n4\n9\n$MEASUREMENT\n70\n1\n0\nENDSEC\n");
-    out.push_str("0\nSECTION\n2\nTABLES\n0\nTABLE\n2\nLTYPE\n70\n1\n0\nLTYPE\n100\nAcDbSymbolTableRecord\n100\nAcDbLinetypeTableRecord\n2\nCONTINUOUS\n70\n0\n3\nSolid line\n72\n65\n73\n0\n40\n0.0\n0\nENDTAB\n");
-    out.push_str("0\nTABLE\n2\nLAYER\n70\n4\n");
-    for (layer, color, plot) in [
-        ("0", 7, 1),
-        ("OUTLINE", 7, 1),
-        ("HOLES", 1, 1),
-        ("DIMENSIONS", 4, 0),
-    ] {
-        let _ = write!(
-            out,
-            "0\nLAYER\n100\nAcDbSymbolTableRecord\n100\nAcDbLayerTableRecord\n2\n{layer}\n70\n0\n62\n{color}\n6\nCONTINUOUS\n290\n{plot}\n"
-        );
-    }
-    out.push_str("0\nENDTAB\n0\nENDSEC\n0\nSECTION\n2\nENTITIES\n");
+    let mut out = begin_file(false);
     for profile in profiles {
         let layer = if area(&profile) > 0.0 {
             "OUTLINE"
         } else {
             "HOLES"
         };
-        if let Some(&Circle {
+        let analytic = circles.iter().find(|circle| circle.matches(&profile)).copied();
+        let fitted = if analytic.is_none() && layer == "HOLES" {
+            fit_circle_profile(&profile)
+        } else {
+            None
+        };
+        if let Some(Circle {
             center: c,
             radius: r,
             ..
-        }) = circles.iter().find(|c| c.matches(&profile))
+        }) = analytic.or(fitted)
         {
             let _ = write!(
                 out,
@@ -74,9 +68,68 @@ pub fn render_dxf(shape: &SolidShape, check: &CheckReport) -> Result<String, Str
             }
         }
     }
+    Ok(end_file(out, check))
+}
+
+/// Exports an orthographic native B-Rep engineering view of the XY plane,
+/// seen from +Z. `VISIBLE` is solid and `HIDDEN` is dashed. Use [`render_dxf`]
+/// for closed through-cut outlines; the engineering view is not a cut profile.
+pub fn render_dxf_view(shape: &SolidShape, check: &CheckReport) -> Result<String, String> {
+    let projection = super::hlr::project(shape, ViewKind::Top)?
+        .ok_or("exact DXF views require a native OCCT B-Rep; use --out-dxf for cut profiles")?;
+    let mut out = begin_file(true);
+    for (layer, paths) in [
+        ("VISIBLE", projection.visible),
+        ("HIDDEN", projection.hidden),
+    ] {
+        for path in paths {
+            // PLINEGEN (128) keeps the hidden dash pattern continuous through
+            // the points generated when sampling a curved B-Rep edge.
+            let _ = write!(
+                out,
+                "0\nLWPOLYLINE\n100\nAcDbEntity\n8\n{layer}\n100\nAcDbPolyline\n90\n{}\n70\n128\n",
+                path.len()
+            );
+            for [x, y] in path {
+                let _ = write!(out, "10\n{x:.9}\n20\n{y:.9}\n");
+            }
+        }
+    }
+    Ok(end_file(out, check))
+}
+
+fn begin_file(hlr: bool) -> String {
+    let mut out = String::new();
+    out.push_str("0\nSECTION\n2\nHEADER\n9\n$ACADVER\n1\nAC1015\n9\n$INSUNITS\n70\n4\n9\n$MEASUREMENT\n70\n1\n0\nENDSEC\n");
+    let _ = write!(
+        out,
+        "0\nSECTION\n2\nTABLES\n0\nTABLE\n2\nLTYPE\n70\n{}\n",
+        if hlr { 2 } else { 1 }
+    );
+    out.push_str("0\nLTYPE\n100\nAcDbSymbolTableRecord\n100\nAcDbLinetypeTableRecord\n2\nCONTINUOUS\n70\n0\n3\nSolid line\n72\n65\n73\n0\n40\n0.0\n");
+    if hlr {
+        out.push_str("0\nLTYPE\n100\nAcDbSymbolTableRecord\n100\nAcDbLinetypeTableRecord\n2\nHIDDEN\n70\n0\n3\nHidden edges\n72\n65\n73\n2\n40\n3.0\n49\n2.0\n74\n0\n49\n-1.0\n74\n0\n");
+    }
+    out.push_str("0\nENDTAB\n0\nTABLE\n2\nLAYER\n70\n4\n");
+    let profile_layers = [("OUTLINE", 7, "CONTINUOUS"), ("HOLES", 1, "CONTINUOUS")];
+    let drawing_layers = [("VISIBLE", 7, "CONTINUOUS"), ("HIDDEN", 8, "HIDDEN")];
+    for (layer, color, line_type, plot) in std::iter::once(("0", 7, "CONTINUOUS", 1))
+        .chain((if hlr { drawing_layers } else { profile_layers }).map(|(n, c, t)| (n, c, t, 1)))
+        .chain(std::iter::once(("DIMENSIONS", 4, "CONTINUOUS", 0)))
+    {
+        let _ = write!(
+            out,
+            "0\nLAYER\n100\nAcDbSymbolTableRecord\n100\nAcDbLayerTableRecord\n2\n{layer}\n70\n0\n62\n{color}\n6\n{line_type}\n290\n{plot}\n"
+        );
+    }
+    out.push_str("0\nENDTAB\n0\nENDSEC\n0\nSECTION\n2\nENTITIES\n");
+    out
+}
+
+fn end_file(mut out: String, check: &CheckReport) -> String {
     add_dimensions(&mut out, check);
     out.push_str("0\nENDSEC\n0\nEOF\n");
-    Ok(out.replace('\n', "\r\n"))
+    out.replace('\n', "\r\n")
 }
 
 fn add_dimensions(out: &mut String, check: &CheckReport) {
@@ -165,10 +218,15 @@ impl Region {
 
 #[derive(Clone, Copy)]
 struct Segment {
+    a_key: Key,
+    b_key: Key,
     a: Point,
     b: Point,
     bounds: Bounds,
 }
+
+const VERTEX_WELD_MM: f64 = 1.0e-4;
+const PROBE_DISTANCES_MM: [f64; 4] = [EPS * 4.0, 1.0e-4, 1.0e-3, 0.01];
 
 pub(super) fn projected_profiles(
     shape: &SolidShape,
@@ -235,16 +293,21 @@ pub(super) fn projected_profiles(
         .collect();
     let segments: Vec<_> = unique
         .into_iter()
-        .map(|(a, b)| {
-            let [a, b] = [point(a), point(b)];
+        .map(|(a_key, b_key)| {
+            let [a, b] = [point(a_key), point(b_key)];
             Segment {
+                a_key,
+                b_key,
                 a,
                 b,
                 bounds: Bounds::new(&[a, b]),
             }
         })
         .collect();
-    let mut splits = vec![vec![0.0, 1.0]; segments.len()];
+    let mut splits: Vec<Vec<(f64, Key)>> = segments
+        .iter()
+        .map(|s| vec![(0.0, s.a_key), (1.0, s.b_key)])
+        .collect();
     for (i, a) in segments.iter().enumerate() {
         for (j, b) in segments.iter().enumerate().skip(i + 1) {
             if b.bounds.min[0] > a.bounds.max[0] + EPS {
@@ -257,57 +320,88 @@ pub(super) fn projected_profiles(
             split(a, b, &mut left[i], &mut right[0]);
         }
     }
+    let nearby_pad = PROBE_DISTANCES_MM[PROBE_DISTANCES_MM.len() - 1] + EPS * 4.0;
     let mut boundary: BTreeMap<Key, BTreeSet<Key>> = BTreeMap::new();
     for (s, ts) in segments.iter().zip(&mut splits) {
         let d = sub(s.b, s.a);
         let len = length(d);
-        ts.sort_by(f64::total_cmp);
-        ts.dedup_by(|a, b| (*a - *b).abs() * len <= EPS);
+        ts.sort_by(|x, y| x.0.total_cmp(&y.0).then_with(|| x.1.cmp(&y.1)));
+        ts.dedup_by(|b, a| b.1 == a.1 || (b.0 - a.0).abs() * len <= EPS);
         let n = [-d[1] / len, d[0] / len];
         let nearby: Vec<_> = regions
             .iter()
             .filter(|r| {
                 (0..2).all(|i| {
-                    r.bounds.min[i] <= s.bounds.max[i] + EPS * 4.0
-                        && s.bounds.min[i] <= r.bounds.max[i] + EPS * 4.0
+                    r.bounds.min[i] <= s.bounds.max[i] + nearby_pad
+                        && s.bounds.min[i] <= r.bounds.max[i] + nearby_pad
                 })
             })
             .collect();
         for pair in ts.windows(2) {
-            let mid = add(s.a, d, (pair[0] + pair[1]) * 0.5);
+            let (t0, k0) = pair[0];
+            let (t1, k1) = pair[1];
+            if k0 == k1 {
+                continue;
+            }
+            let mid = add(s.a, d, (t0 + t1) * 0.5);
             let filled = |side| nearby.iter().any(|r| r.contains(add(mid, n, side)));
-            let (a, b) = match (filled(EPS * 4.0), filled(-EPS * 4.0)) {
-                (true, false) => (pair[0], pair[1]),
-                (false, true) => (pair[1], pair[0]),
-                _ => continue,
+            // A 4e-7 mm probe misses tessellated triangles whose edge is the
+            // silhouette. Step out to 0.01 mm, still far below a rib or hole,
+            // and keep the edge when exactly one side is material.
+            let mut classified = None;
+            for probe in PROBE_DISTANCES_MM {
+                match (filled(probe), filled(-probe)) {
+                    (true, false) => {
+                        classified = Some((k0, k1));
+                        break;
+                    }
+                    (false, true) => {
+                        classified = Some((k1, k0));
+                        break;
+                    }
+                    (true, true) => break,
+                    (false, false) => continue,
+                }
+            }
+            let Some((a, b)) = classified else {
+                continue;
             };
-            let [a, b] = [key(add(s.a, d, a)), key(add(s.a, d, b))];
             if a != b {
                 boundary.entry(a).or_default().insert(b);
             }
         }
     }
-
+    weld_boundary(&mut boundary, VERTEX_WELD_MM);
     let mut profiles = Vec::new();
     while let Some((&start, _)) = boundary.first_key_value() {
         let mut ring = vec![point(start)];
         let mut current = start;
         let mut incoming = None;
         loop {
-            let next = boundary
-                .get(&current)
-                .and_then(|choices| {
-                    choices.iter().copied().max_by(|&a, &b| {
-                        let turn = |next| {
-                            let d = sub(point(next), point(current));
-                            incoming.map_or(0.0, |last| cross(last, d).atan2(dot(last, d)))
-                        };
-                        turn(a).total_cmp(&turn(b))
-                    })
+            let next = boundary.get(&current).and_then(|choices| {
+                choices.iter().copied().max_by(|&a, &b| {
+                    let turn = |next| {
+                        let d = sub(point(next), point(current));
+                        incoming.map_or(0.0, |last| cross(last, d).atan2(dot(last, d)))
+                    };
+                    turn(a).total_cmp(&turn(b))
                 })
-                .ok_or(
-                    "DXF projection contains an open boundary; no cutting profile was exported",
-                )?;
+            });
+            let Some(next) = next else {
+                if ring.len() >= 3 && length(sub(point(current), point(start))) <= PROFILE_SNAP_MM {
+                    break;
+                }
+                let Some(stitched) = closest_unfinished(&boundary, current) else {
+                    return Err(
+                        "DXF projection contains an open boundary; no cutting profile was exported"
+                            .into(),
+                    );
+                };
+                ring.push(point(stitched));
+                incoming = Some(sub(point(stitched), point(current)));
+                current = stitched;
+                continue;
+            };
             let choices = boundary.get_mut(&current).unwrap();
             choices.remove(&next);
             if choices.is_empty() {
@@ -330,7 +424,50 @@ pub(super) fn projected_profiles(
     Ok(profiles)
 }
 
-fn split(a: &Segment, b: &Segment, ta: &mut Vec<f64>, tb: &mut Vec<f64>) {
+/// Collapse numerically coincident boundary vertices (within `tol_mm`, e.g. 0.1 µm)
+/// caused by triple intersections or collinear quantization drift, dropping self-loops
+/// and cancelling opposite sliver edge pairs.
+fn weld_boundary(boundary: &mut BTreeMap<Key, BTreeSet<Key>>, tol_mm: f64) {
+    let mut vertices: BTreeSet<Key> = BTreeSet::new();
+    for (&u, vs) in boundary.iter() {
+        vertices.insert(u);
+        vertices.extend(vs.iter().copied());
+    }
+    let mut reps: Vec<Key> = Vec::with_capacity(vertices.len());
+    let mut remap: BTreeMap<Key, Key> = BTreeMap::new();
+    for v in vertices {
+        let vp = point(v);
+        let rep = reps
+            .iter()
+            .copied()
+            .find(|&r| length(sub(point(r), vp)) <= tol_mm)
+            .unwrap_or_else(|| {
+                reps.push(v);
+                v
+            });
+        remap.insert(v, rep);
+    }
+    let mut welded: BTreeMap<Key, BTreeSet<Key>> = BTreeMap::new();
+    for (u, vs) in std::mem::take(boundary) {
+        let ru = remap[&u];
+        for v in vs {
+            let rv = remap[&v];
+            if ru == rv {
+                continue;
+            }
+            if welded.get_mut(&rv).is_some_and(|back| back.remove(&ru)) {
+                if welded.get(&rv).is_some_and(BTreeSet::is_empty) {
+                    welded.remove(&rv);
+                }
+            } else {
+                welded.entry(ru).or_default().insert(rv);
+            }
+        }
+    }
+    *boundary = welded;
+}
+
+fn split(a: &Segment, b: &Segment, ta: &mut Vec<(f64, Key)>, tb: &mut Vec<(f64, Key)>) {
     let r = sub(a.b, a.a);
     let s = sub(b.b, b.a);
     let v = sub(b.a, a.a);
@@ -341,29 +478,77 @@ fn split(a: &Segment, b: &Segment, ta: &mut Vec<f64>, tb: &mut Vec<f64>) {
     if c.abs() > EPS * lr.max(ls) {
         let (t, u) = (cross(v, s) / c, cross(v, r) / c);
         if valid(t, ea) && valid(u, eb) {
-            ta.push(t.clamp(0.0, 1.0));
-            tb.push(u.clamp(0.0, 1.0));
+            let tc = t.clamp(0.0, 1.0);
+            let uc = u.clamp(0.0, 1.0);
+            let pa = add(a.a, r, tc);
+            let pb = add(b.a, s, uc);
+            let k = key([(pa[0] + pb[0]) * 0.5, (pa[1] + pb[1]) * 0.5]);
+            ta.push((tc, k));
+            tb.push((uc, k));
         }
     } else if cross(v, r).abs() <= EPS * lr {
-        for p in [b.a, b.b] {
+        for (p, k) in [(b.a, b.a_key), (b.b, b.b_key)] {
             let t = dot(sub(p, a.a), r) / dot(r, r);
             if valid(t, ea) {
-                ta.push(t.clamp(0.0, 1.0));
+                ta.push((t.clamp(0.0, 1.0), k));
             }
         }
-        for p in [a.a, a.b] {
+        for (p, k) in [(a.a, a.a_key), (a.b, a.b_key)] {
             let u = dot(sub(p, b.a), s) / dot(s, s);
             if valid(u, eb) {
-                tb.push(u.clamp(0.0, 1.0));
+                tb.push((u.clamp(0.0, 1.0), k));
             }
         }
     }
 }
 
-struct Circle {
-    center: Point,
-    radius: f64,
-    max_chord: f64,
+#[derive(Clone, Copy)]
+pub(crate) struct Circle {
+    pub(crate) center: Point,
+    pub(crate) radius: f64,
+    pub(crate) max_chord: f64,
+}
+
+/// Fit a closed profile to a circle. Tessellated OCCT holes are not within
+/// `1e-6` mm of an analytic rim, but they are circles at the DXF tolerance.
+pub(crate) fn fit_circle_profile(ring: &[Point]) -> Option<Circle> {
+    if ring.len() < 8 {
+        return None;
+    }
+    let a = ring[0];
+    let b = sub(ring[ring.len() / 3], a);
+    let c = sub(ring[ring.len() * 2 / 3], a);
+    let det = 2.0 * cross(b, c);
+    if det.abs() <= EPS * EPS {
+        return None;
+    }
+    let (u, v) = (dot(b, b), dot(c, c));
+    let center = [
+        a[0] + (u * c[1] - v * b[1]) / det,
+        a[1] + (b[0] * v - c[0] * u) / det,
+    ];
+    let radius = length(sub(a, center));
+    if radius <= EPS {
+        return None;
+    }
+    let max_chord = edges(ring)
+        .map(|(p, q)| length(sub(p, q)))
+        .fold(0.0, f64::max);
+    // A long closing chord is an arc or an open trim, not a full hole.
+    if max_chord >= radius {
+        return None;
+    }
+    if ring
+        .iter()
+        .any(|p| (length(sub(*p, center)) - radius).abs() > PROFILE_SNAP_MM)
+    {
+        return None;
+    }
+    Some(Circle {
+        center,
+        radius,
+        max_chord,
+    })
 }
 
 impl Circle {
@@ -434,8 +619,27 @@ fn inside([x, y]: Point, ring: &[Point]) -> bool {
 fn point((x, y): Key) -> Point {
     [x as f64 * EPS, y as f64 * EPS]
 }
-fn key([x, y]: Point) -> Key {
+pub(super) fn key([x, y]: Point) -> Key {
     ((x / EPS).round() as i64, (y / EPS).round() as i64)
+}
+
+/// Nearest vertex that still has an unused boundary edge, within the mesh snap.
+pub(super) fn closest_unfinished(
+    boundary: &BTreeMap<Key, BTreeSet<Key>>,
+    current: Key,
+) -> Option<Key> {
+    let origin = point(current);
+    let mut best: Option<(f64, Key)> = None;
+    for (&candidate, choices) in boundary {
+        if candidate == current || choices.is_empty() {
+            continue;
+        }
+        let distance = length(sub(point(candidate), origin));
+        if distance <= PROFILE_SNAP_MM && best.is_none_or(|(best_d, _)| distance < best_d) {
+            best = Some((distance, candidate));
+        }
+    }
+    best.map(|(_, candidate)| candidate)
 }
 fn sub(a: Point, b: Point) -> Point {
     [a[0] - b[0], a[1] - b[1]]

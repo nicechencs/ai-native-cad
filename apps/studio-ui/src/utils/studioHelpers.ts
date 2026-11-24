@@ -103,6 +103,48 @@ const KCL_BUILTIN_COMPLETIONS: readonly LspCompletionItem[] = [
     insert_text:
       "component(part = BasePart(), origin = [0mm, 0mm, 0mm], rotation = [0deg, 0deg, 0deg])",
   },
+  {
+    label: "ellipse",
+    kind: "operator",
+    detail: "(rx: Length, ry: Length, center?: Length[2], segments?: u32) -> SketchEntity",
+    insert_text: "ellipse(rx = 30.0mm, ry = 18.0mm, center = [0mm, 0mm])",
+  },
+  {
+    label: "profile::ellipse",
+    kind: "namespace",
+    detail: "(rx: Length, ry: Length, center?: Length[2], segments?: u32, plane?: Plane) -> Sketch2D",
+    insert_text: "profile::ellipse(rx = 30.0mm, ry = 18.0mm, center = [0mm, 0mm], plane = XY_PLANE)",
+  },
+  {
+    label: "spline",
+    kind: "operator",
+    detail: "(points: Length[2][], closed?: bool, segments_per_span?: u32) -> SketchEntity",
+    insert_text:
+      "spline(points = [[24mm, 0mm], [0mm, 16mm], [-24mm, 0mm], [0mm, -16mm]], closed = true)",
+  },
+  {
+    label: "profile::spline",
+    kind: "namespace",
+    detail: "(points: Length[2][], closed?: bool, segments_per_span?: u32, plane?: Plane) -> Sketch2D",
+    insert_text:
+      "profile::spline(points = [[24mm, 0mm], [0mm, 16mm], [-24mm, 0mm], [0mm, -16mm]], closed = true, plane = XY_PLANE)",
+  },
+  {
+    label: "path::helix",
+    kind: "namespace",
+    detail:
+      "(radius: Length, pitch: Length, turns?: f64, origin?: Length[3], segments_per_turn?: u32) -> Length[3][]",
+    insert_text:
+      "path::helix(radius = 20.0mm, pitch = 12.0mm, turns = 2.0, origin = [0mm, 0mm, 0mm])",
+  },
+  {
+    label: "path::spline3d",
+    kind: "namespace",
+    detail:
+      "(points: Length[3][], closed?: bool, segments_per_span?: u32) -> Length[3][]",
+    insert_text:
+      "path::spline3d(points = [[0mm, 0mm, 0mm], [20mm, 15mm, 18mm], [45mm, 0mm, 36mm]], segments_per_span = 12)",
+  },
 ];
 
 const BUILTIN_HOVER_DOCS: Readonly<Record<string, LspHoverInfo>> = {
@@ -145,6 +187,38 @@ const BUILTIN_HOVER_DOCS: Readonly<Record<string, LspHoverInfo>> = {
     symbol: "assembly",
     dimension_type: "Assembly Declaration",
     summary: "声明多子组件装配体，支持 BOM 拆件、爆炸视图与 STEP AP242 装配树导出。",
+  },
+  ellipse: {
+    symbol: "ellipse",
+    dimension_type: "(rx: Length, ry: Length, center?: Length[2], segments?: u32) -> SketchEntity",
+    summary: "草图椭圆轮廓原语：通过正长短半轴 rx / ry 生成逆时针闭合椭圆边界。",
+  },
+  "profile::ellipse": {
+    symbol: "profile::ellipse",
+    dimension_type: "(rx: Length, ry: Length, center?: Length[2], segments?: u32, plane?: Plane) -> Sketch2D",
+    summary: "快捷二维椭圆截面原语：直接返回可传入 extrude / loft / sweep 的闭合 Sketch2D 截面。",
+  },
+  spline: {
+    symbol: "spline",
+    dimension_type: "(points: Length[2][], closed?: bool, segments_per_span?: u32) -> SketchEntity",
+    summary: "草图样条曲线原语：基于控制点环生成平滑 Catmull-Rom 三次插值闭合曲线。",
+  },
+  "profile::spline": {
+    symbol: "profile::spline",
+    dimension_type: "(points: Length[2][], closed?: bool, segments_per_span?: u32, plane?: Plane) -> Sketch2D",
+    summary: "快捷二维闭合样条截面原语：直接返回可传入 extrude / loft 的平滑样条 Sketch2D 截面。",
+  },
+  "path::helix": {
+    symbol: "path::helix",
+    dimension_type:
+      "(radius: Length, pitch: Length, turns?: f64, origin?: Length[3], segments_per_turn?: u32) -> Length[3][]",
+    summary: "三维圆柱螺旋路径原语：生成可传入 sweep(profile, path) 的空间螺旋扫掠中心线点列。",
+  },
+  "path::spline3d": {
+    symbol: "path::spline3d",
+    dimension_type:
+      "(points: Length[3][], closed?: bool, segments_per_span?: u32) -> Length[3][]",
+    summary: "三维 Catmull-Rom 空间样条路径原语：通过 3D 控制点序列插值生成平滑空间扫掠轨迹。",
   },
 };
 
@@ -286,8 +360,194 @@ export function analyzeKclLspFallback(
 
   return {
     backend: "builtin-analyzer",
-    completions: completions.slice(0, 18),
+    completions: completions.slice(0, 28),
     hover,
+  };
+}
+
+export type QuickFeatureKind =
+  | "through_hole"
+  | "counterbore_hole"
+  | "fillet_edges"
+  | "chamfer_edges";
+
+function insertQuickFeatureBeforeReturn(
+  kclSource: string,
+  buildStatements: (indent: string, targetVar: string) => readonly string[],
+): string {
+  const newline = kclSource.includes("\r\n") ? "\r\n" : "\n";
+  const lines = kclSource.split(/\r?\n/);
+
+  // Prefer the last `return <ident>` inside a `part` block (skipping assembly `return [...]`).
+  let targetLineIdx = -1;
+  let targetIndent = "    ";
+  let targetVar = "";
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const m = /^(\s*)return\s+([A-Za-z_]\w*)\s*(?:\/\/.*)?$/.exec(lines[i]);
+    if (m) {
+      targetLineIdx = i;
+      targetIndent = m[1] || "    ";
+      targetVar = m[2];
+    }
+  }
+
+  if (targetLineIdx >= 0 && targetVar) {
+    const inserted = buildStatements(targetIndent, targetVar);
+    const updatedLines = [
+      ...lines.slice(0, targetLineIdx),
+      ...inserted,
+      ...lines.slice(targetLineIdx),
+    ];
+    return updatedLines.join(newline);
+  }
+
+  // Fallback: `return <expr>` where `<expr>` is not a simple identifier (and not an assembly array `[`).
+  const exprReturnMatch = /^(\s*)return\s+(?!\[)([\s\S]+?)(?=\r?\n\s*\})/m.exec(kclSource);
+  if (exprReturnMatch && exprReturnMatch.index !== undefined) {
+    const indent = exprReturnMatch[1] || "    ";
+    const exprText = exprReturnMatch[2].trim();
+    const fallbackVar = "final_part";
+    const inserted = buildStatements(indent, fallbackVar);
+    const replacement = [
+      `${indent}let ${fallbackVar} = ${exprText}`,
+      ...inserted,
+      `${indent}return ${fallbackVar}`,
+    ].join(newline);
+    return (
+      kclSource.slice(0, exprReturnMatch.index) +
+      replacement +
+      kclSource.slice(exprReturnMatch.index + exprReturnMatch[0].length)
+    );
+  }
+
+  return kclSource;
+}
+
+export function applyFaceQuickFeatureToKcl(
+  kclSource: string,
+  faceId: string,
+  featureKind: QuickFeatureKind,
+  paramValueMm?: number,
+): { nextSource: string; summary: string } {
+  const faceLabel = faceId && faceId.trim() ? faceId.trim() : "当前实体";
+
+  if (featureKind === "fillet_edges") {
+    const rVal =
+      typeof paramValueMm === "number" && Number.isFinite(paramValueMm) && paramValueMm > 0
+        ? paramValueMm
+        : 2.0;
+    const rText = `${rVal.toFixed(1)}mm`;
+    const existingFilletRe = /(\|>\s*fillet\(\s*(?:r\s*=\s*)?)(\d+(?:\.\d+)?)mm(\s*\))/;
+    if (existingFilletRe.test(kclSource)) {
+      const nextSource = kclSource.replace(existingFilletRe, `$1${rText}$3`);
+      return {
+        nextSource,
+        summary: `已在 ${faceLabel} 更新圆角特征 fillet(r = ${rText})`,
+      };
+    }
+    const nextSource = insertQuickFeatureBeforeReturn(
+      kclSource,
+      (indent, targetVar) => [
+        `${indent}let ${targetVar} = ${targetVar} |> fillet(r = ${rText})`,
+      ],
+    );
+    return {
+      nextSource,
+      summary: `已在 ${faceLabel} 添加圆角特征 fillet(r = ${rText})`,
+    };
+  }
+
+  if (featureKind === "chamfer_edges") {
+    const dVal =
+      typeof paramValueMm === "number" && Number.isFinite(paramValueMm) && paramValueMm > 0
+        ? paramValueMm
+        : 1.5;
+    const dText = `${dVal.toFixed(1)}mm`;
+    const existingChamferRe = /(\|>\s*chamfer\(\s*(?:d\s*=\s*)?)(\d+(?:\.\d+)?)mm(\s*\))/;
+    if (existingChamferRe.test(kclSource)) {
+      const nextSource = kclSource.replace(existingChamferRe, `$1${dText}$3`);
+      return {
+        nextSource,
+        summary: `已在 ${faceLabel} 更新倒角特征 chamfer(d = ${dText})`,
+      };
+    }
+    const nextSource = insertQuickFeatureBeforeReturn(
+      kclSource,
+      (indent, targetVar) => [
+        `${indent}let ${targetVar} = ${targetVar} |> chamfer(d = ${dText})`,
+      ],
+    );
+    return {
+      nextSource,
+      summary: `已在 ${faceLabel} 添加倒角特征 chamfer(d = ${dText})`,
+    };
+  }
+
+  if (featureKind === "through_hole") {
+    const dVal =
+      typeof paramValueMm === "number" && Number.isFinite(paramValueMm) && paramValueMm > 0
+        ? paramValueMm
+        : 6.6;
+    const dText = `${dVal.toFixed(1)}mm`;
+    const existingHoleRe =
+      /(let\s+quick_through_hole\s*=\s*hole::simple\(\s*d\s*=\s*)(\d+(?:\.\d+)?)mm/;
+    if (existingHoleRe.test(kclSource)) {
+      const nextSource = kclSource.replace(existingHoleRe, `$1${dText}`);
+      return {
+        nextSource,
+        summary: `已在 ${faceLabel} 更新定位通孔 hole::simple(d = ${dText}, depth = 15.0mm)`,
+      };
+    }
+    const nextSource = insertQuickFeatureBeforeReturn(
+      kclSource,
+      (indent, targetVar) => [
+        `${indent}let quick_through_hole = hole::simple(d = ${dText}, depth = 15.0mm)`,
+        `${indent}let ${targetVar} = ${targetVar} |> boolean::subtract(tools = [quick_through_hole], preserve_exact_interfaces = true)`,
+      ],
+    );
+    return {
+      nextSource,
+      summary: `已在 ${faceLabel} 添加定位通孔 hole::simple(d = ${dText}, depth = 15.0mm)`,
+    };
+  }
+
+  // counterbore_hole
+  const dThrough =
+    typeof paramValueMm === "number" && Number.isFinite(paramValueMm) && paramValueMm > 0
+      ? paramValueMm
+      : 6.6;
+  const dCbore =
+    Math.abs(dThrough - 6.6) < 0.05
+      ? 11.0
+      : Math.max(dThrough + 2.4, Number((dThrough * 1.65).toFixed(1)));
+  const depthCbore =
+    Math.abs(dThrough - 6.6) < 0.05 ? 5.5 : Number((dThrough * 0.85).toFixed(1));
+  const dThroughText = `${dThrough.toFixed(1)}mm`;
+  const dCboreText = `${dCbore.toFixed(1)}mm`;
+  const depthCboreText = `${depthCbore.toFixed(1)}mm`;
+  const existingCboreRe =
+    /let\s+quick_cbore_hole\s*=\s*hole::counterbore\([^)]*\)/;
+  if (existingCboreRe.test(kclSource)) {
+    const nextSource = kclSource.replace(
+      existingCboreRe,
+      `let quick_cbore_hole = hole::counterbore(d_through = ${dThroughText}, d_cbore = ${dCboreText}, depth_cbore = ${depthCboreText})`,
+    );
+    return {
+      nextSource,
+      summary: `已在 ${faceLabel} 更新沉头孔 hole::counterbore(d_through = ${dThroughText}, d_cbore = ${dCboreText}, depth_cbore = ${depthCboreText})`,
+    };
+  }
+  const nextSource = insertQuickFeatureBeforeReturn(
+    kclSource,
+    (indent, targetVar) => [
+      `${indent}let quick_cbore_hole = hole::counterbore(d_through = ${dThroughText}, d_cbore = ${dCboreText}, depth_cbore = ${depthCboreText})`,
+      `${indent}let ${targetVar} = ${targetVar} |> boolean::subtract(tools = [quick_cbore_hole], preserve_exact_interfaces = true)`,
+    ],
+  );
+  return {
+    nextSource,
+    summary: `已在 ${faceLabel} 添加沉头孔 hole::counterbore(d_through = ${dThroughText}, d_cbore = ${dCboreText}, depth_cbore = ${depthCboreText})`,
   };
 }
 
@@ -306,6 +566,101 @@ export function generateFallbackKclFromPrompt(
   manufacturingMethod = "CNC_3AXIS_MILLING",
 ): string {
   const lower = prompt.toLowerCase();
+
+  if (/椭圆|ellipse|elliptic|oval/.test(lower)) {
+    const rx = extractLengthMm(
+      prompt,
+      /(?:长半轴|长轴半径|rx|major)[^\d]{0,8}(\d+(?:\.\d+)?)/i,
+      40.0,
+    );
+    const ry = extractLengthMm(
+      prompt,
+      /(?:短半轴|短轴半径|ry|minor)[^\d]{0,8}(\d+(?:\.\d+)?)/i,
+      24.0,
+    );
+    const height = extractLengthMm(
+      prompt,
+      /(?:厚|高|拉伸|thickness|height|extrude)[^\d]{0,8}(\d+(?:\.\d+)?)/i,
+      10.0,
+    );
+    const defaultBore = Math.max(6.0, Math.min(16.0, Math.min(rx, ry) * 0.6));
+    const rawBore = extractLengthMm(
+      prompt,
+      /(?:内孔|孔径|bore)[^\d]{0,8}(\d+(?:\.\d+)?)/i,
+      defaultBore,
+    );
+    const bore = Math.min(rawBore, Math.max(4.0, Math.min(rx, ry) * 1.2));
+
+    return `@unit(length = "mm", angle = "deg", force = "N")
+@material("${material}")
+@manufacturing(method = "${manufacturingMethod}", min_tool_radius = 1.5mm)
+
+part EllipticalFlangePlate(
+    major_rx: Length = ${rx.toFixed(1)}mm,
+    minor_ry: Length = ${ry.toFixed(1)}mm,
+    plate_h: Length = ${height.toFixed(1)}mm,
+    bore_d: Length = ${bore.toFixed(1)}mm @pmi::tolerance("H7")
+) -> Solid {
+    let base = profile::ellipse(rx = major_rx, ry = minor_ry, center = [0mm, 0mm], plane = XY_PLANE)
+        |> extrude(h = plate_h)
+    let bore_tool = cylinder(d = bore_d, h = plate_h + 4.0mm, origin = [0mm, 0mm, -2.0mm], exact_brep = true)
+        |> tag::cylindrical_faces("bearing_seat_wall")
+    let final_part = base
+        |> boolean::subtract(tools = [bore_tool], preserve_exact_interfaces = true)
+    return final_part
+}
+`;
+  }
+
+  if (/螺旋|盘管|弹簧|helix|helical|spiral/.test(lower)) {
+    const coilRadius = extractLengthMm(
+      prompt,
+      /(?:螺旋半径|中径半径|半径|radius)[^\d]{0,8}(\d+(?:\.\d+)?)/i,
+      20.0,
+    );
+    const pitch = extractLengthMm(
+      prompt,
+      /(?:螺距|节距|pitch)[^\d]{0,8}(\d+(?:\.\d+)?)/i,
+      14.0,
+    );
+    const rawTubeR = extractLengthMm(
+      prompt,
+      /(?:截面半径|管径|线径|tube)[^\d]{0,8}(\d+(?:\.\d+)?)/i,
+      3.0,
+    );
+    const tubeRadius = Math.max(1.5, Math.min(rawTubeR, pitch * 0.35, coilRadius * 0.4));
+    const turns = 1.5;
+    const steps = 18;
+    const pts: string[] = [];
+    for (let i = 0; i <= steps; i += 1) {
+      const t = i / steps;
+      const theta = t * turns * Math.PI * 2;
+      const x = (coilRadius * Math.cos(theta)).toFixed(2);
+      const y = (coilRadius * Math.sin(theta)).toFixed(2);
+      const z = (t * turns * pitch).toFixed(2);
+      pts.push(`        [${x}mm, ${y}mm, ${z}mm]`);
+    }
+
+    return `@unit(length = "mm", angle = "deg", force = "N")
+@material("${material}")
+@manufacturing(method = "${manufacturingMethod}", min_tool_radius = 1.5mm)
+
+// Spatial helical sweep path: path::helix(radius = ${coilRadius.toFixed(1)}mm, pitch = ${pitch.toFixed(1)}mm, turns = ${turns.toFixed(1)})
+part HelicalCoilPipe(
+    coil_radius: Length = ${coilRadius.toFixed(1)}mm,
+    coil_pitch: Length = ${pitch.toFixed(1)}mm,
+    tube_radius: Length = ${tubeRadius.toFixed(1)}mm
+) -> Solid {
+    let section = profile::ellipse(rx = tube_radius, ry = tube_radius, center = [0mm, 0mm], plane = XY_PLANE)
+    let helix_path = [
+${pts.join(",\n")}
+    ]
+    let final_part = section
+        |> sweep(path = helix_path)
+    return final_part
+}
+`;
+  }
 
   if (
     /装配|assembly|组件|端盖.*底座|轴承座.*盖|mate/.test(lower)
@@ -465,15 +820,17 @@ export function handleRange(handle: EditHandle): readonly [number, number] {
 
 export function clipToSection(
   points: readonly Vec3[],
-  axis: 0 | 2,
+  axis: 0 | 1 | 2,
   limit: number,
   closed = true,
+  flip = false,
 ): readonly Vec3[] {
   const clipped: Vec3[] = [];
+  const sign = flip ? -1 : 1;
   let previous = (closed ? points.at(-1) : points[0])!;
   for (const next of points) {
-    const a = previous[axis] - limit;
-    const b = next[axis] - limit;
+    const a = (previous[axis] - limit) * sign;
+    const b = (next[axis] - limit) * sign;
     if ((a < 0 && b > 0) || (a > 0 && b < 0)) {
       const t = a / (a - b);
       clipped.push([

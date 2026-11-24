@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-native-cad.dev/schemas/runtime-event.schema.json",
+  "title": "Runtime Event (one JSONL line)",
+  "description": "Runtime log event written by every process to <app-data>/logs/<process>.jsonl. Never contains prompts, full source, patches, mesh data or secrets. Paths are workspace-relative; outside the workspace they are '<external>/<basename>'.",
+  "type": "object",
+  "required": ["ts", "level", "trace_id", "span_id", "component", "operation", "message"],
+  "properties": {
+    "ts": { "type": "string", "format": "date-time", "description": "RFC3339 UTC timestamp, e.g. 2026-01-01T00:00:00.000Z" },
+    "level": { "enum": ["error", "warn", "info", "debug", "trace"] },
+    "trace_id": { "type": "string", "pattern": "^[0-9A-Za-z_-]{8,64}$" },
+    "span_id": { "type": "string", "pattern": "^[0-9A-Za-z_-]{8,64}$" },
+    "parent_span_id": { "type": "string", "pattern": "^[0-9A-Za-z_-]{8,64}$" },
+    "component": { "type": "string", "minLength": 1 },
+    "operation": { "type": "string", "minLength": 1 },
+    "message": { "type": "string", "maxLength": 512 },
+    "duration_ms": { "type": "number", "minimum": 0 },
+    "code": {
+      "type": "string",
+      "description": "Runtime error code (R codes). Compile diagnostics keep their E/W codes elsewhere.",
+      "enum": [
+        "R010_GPU_FALLBACK",
+        "R011_IPC_FAILED",
+        "R012_KERNEL_NATIVE",
+        "R013_EMPTY_ISOSURFACE",
+        "R014_VLM_DEGRADED",
+        "R015_DAEMON_RECONNECT",
+        "R016_IO_ERROR"
+      ]
+    },
+    "error_type": { "type": "string" },
+    "node_id": { "type": "string" },
+    "session_id": { "type": "string" },
+    "native_status": { "type": "string" },
+    "path": { "type": "string", "description": "Workspace-relative path, or '<external>/<basename>' outside the workspace." }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,5 @@
+# Keep the desktop build in one place. Cargo resolves this path from
+# src-tauri/, so it lands at the repository's target/desktop/.
+# Do not add another --target-dir; extra directories are never cleaned up.
+[build]
+target-dir = "../../../target/desktop"

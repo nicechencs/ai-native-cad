@@ -1,3 +1,13 @@
+#![forbid(unsafe_code)]
+
+pub mod continuation;
+pub mod dof;
+
+pub use continuation::{
+    ContinuationConfig, ContinuationReport, OrientationLock, solve_with_continuation,
+};
+pub use dof::{DofAnalysis, DofStatus, analyze_dof};
+
 use serde::{Deserialize, Serialize};
 
 pub type PointId = usize;
@@ -197,50 +207,10 @@ impl SketchSystem {
 
     /// Solves the 2D constraint system using damped Levenberg-Marquardt.
     pub fn solve(&mut self, max_iters: usize, tol: f64) -> SolveReport {
-        // Build O(1) variable lookup tables indexed directly by PointId / EdgeId (R22)
-        let mut var_map: Vec<(VarKind, usize)> = Vec::new();
-        let mut point_var_idx: Vec<(Option<usize>, Option<usize>)> =
-            vec![(None, None); self.points.len()];
-        for p in &self.points {
-            if !p.fixed {
-                let ix = var_map.len();
-                var_map.push((VarKind::PointX, p.id));
-                let iy = var_map.len();
-                var_map.push((VarKind::PointY, p.id));
-                point_var_idx[p.id] = (Some(ix), Some(iy));
-            }
-        }
-        let mut circle_var_idx: Vec<Option<usize>> = vec![None; self.geoms.len()];
-        for g in &self.geoms {
-            if let SketchGeom::Circle {
-                id, radius_fixed, ..
-            } = g
-            {
-                if !radius_fixed {
-                    let ir = var_map.len();
-                    var_map.push((VarKind::CircleRadius, *id));
-                    circle_var_idx[*id] = Some(ir);
-                }
-            }
-        }
-        let lookup = VarLookup {
-            point_vars: &point_var_idx,
-            circle_vars: &circle_var_idx,
-        };
-
-        let n_vars = var_map.len();
-        let mut x_vec = Vec::with_capacity(n_vars);
-        for (kind, id) in &var_map {
-            match kind {
-                VarKind::PointX => x_vec.push(self.points[*id].x),
-                VarKind::PointY => x_vec.push(self.points[*id].y),
-                VarKind::CircleRadius => {
-                    if let SketchGeom::Circle { radius, .. } = self.geoms[*id] {
-                        x_vec.push(radius);
-                    }
-                }
-            }
-        }
+        let mut variables = SolverVariables::new(self);
+        let mut x_vec = std::mem::take(&mut variables.values);
+        let lookup = variables.lookup();
+        let n_vars = x_vec.len();
 
         let r0 = self.eval_residuals(&x_vec, &lookup);
         let n_eqs = r0.len();
@@ -282,6 +252,14 @@ impl SketchSystem {
                 break;
             }
             iter += 1;
+            tracing::trace!(
+                component = "cad-gcs",
+                operation = "solve_iteration",
+                iter,
+                rms,
+                lambda,
+                "gcs iteration"
+            );
 
             let jac = self.numeric_jacobian(&x_vec, &lookup, &current_r);
             // Compute A = J^T J + lambda * diag(J^T J) and g = -J^T r
@@ -333,7 +311,7 @@ impl SketchSystem {
         }
 
         // Write solved coordinates back
-        self.apply_vars(&x_vec, &var_map);
+        self.apply_vars(&x_vec, &variables.map);
 
         let final_rms = rms_norm(&current_r);
         let named = self.named_residuals(&current_r);
@@ -370,12 +348,7 @@ impl SketchSystem {
         }
     }
 
-    fn numeric_jacobian(
-        &self,
-        x: &[f64],
-        lookup: &VarLookup<'_>,
-        base_r: &[f64],
-    ) -> Vec<Vec<f64>> {
+    fn numeric_jacobian(&self, x: &[f64], lookup: &VarLookup<'_>, base_r: &[f64]) -> Vec<Vec<f64>> {
         let eps = 1e-7;
         let m = base_r.len();
         let n = x.len();
@@ -420,6 +393,30 @@ impl SketchSystem {
     }
 
     fn eval_residuals(&self, x: &[f64], var_map: &VarLookup<'_>) -> Vec<f64> {
+        self.eval_residuals_impl(x, var_map, None)
+    }
+
+    fn eval_residuals_with_sources(
+        &self,
+        x: &[f64],
+        var_map: &VarLookup<'_>,
+    ) -> (Vec<f64>, Vec<Option<usize>>) {
+        let mut sources = Vec::new();
+        let residuals = self.eval_residuals_impl(x, var_map, Some(&mut sources));
+        (residuals, sources)
+    }
+
+    fn residual_rms(&self) -> f64 {
+        let variables = SolverVariables::new(self);
+        rms_norm(&self.eval_residuals(&variables.values, &variables.lookup()))
+    }
+
+    fn eval_residuals_impl(
+        &self,
+        x: &[f64],
+        var_map: &VarLookup<'_>,
+        mut sources: Option<&mut Vec<Option<usize>>>,
+    ) -> Vec<f64> {
         let mut res = Vec::new();
         // Implicit arc equal-radius constraints: |p1 - c| - |p2 - c| = 0
         for g in &self.geoms {
@@ -433,7 +430,11 @@ impl SketchSystem {
             }
         }
 
-        for c in &self.constraints {
+        if let Some(sources) = &mut sources {
+            sources.resize(res.len(), None);
+        }
+
+        for (index, c) in self.constraints.iter().enumerate() {
             match c {
                 Constraint::Coincident { p1, p2, .. } => {
                     let (x1, y1) = self.point_xy(*p1, x, var_map);
@@ -520,7 +521,8 @@ impl SketchSystem {
                             let _ = (x2, y2);
                             let nx = -ty;
                             let ny = tx;
-                            let dist = ((cx - line_point[0]) * nx + (cy - line_point[1]) * ny).abs();
+                            let dist =
+                                ((cx - line_point[0]) * nx + (cy - line_point[1]) * ny).abs();
                             res.push(dist - r);
                         }
                     }
@@ -571,6 +573,9 @@ impl SketchSystem {
                     _ => {}
                 },
             }
+            if let Some(sources) = &mut sources {
+                sources.resize(res.len(), Some(index));
+            }
         }
         res
     }
@@ -619,7 +624,11 @@ impl SketchSystem {
 
     /// Samples a closed region formed by the given edge IDs into a closed 2D polygon loop.
     /// Strictly validates segment connectivity, closure, positive area, and non-self-intersection (R14).
-    pub fn sample_closed_region(&self, edge_ids: &[EdgeId], arc_segments: usize) -> Result<Vec<[f64; 2]>, String> {
+    pub fn sample_closed_region(
+        &self,
+        edge_ids: &[EdgeId],
+        arc_segments: usize,
+    ) -> Result<Vec<[f64; 2]>, String> {
         if edge_ids.is_empty() {
             return Err("empty closed region".to_string());
         }
@@ -654,7 +663,10 @@ impl SketchSystem {
                     return Ok(poly);
                 }
                 SketchGeom::Line { .. } | SketchGeom::Arc { .. } => {
-                    return Err("open sketch contour: a single line or arc cannot form a closed region".to_string());
+                    return Err(
+                        "open sketch contour: a single line or arc cannot form a closed region"
+                            .to_string(),
+                    );
                 }
             }
         }
@@ -761,7 +773,9 @@ impl SketchSystem {
                     cur_end = Some([end_p.x, end_p.y]);
                 }
                 SketchGeom::Circle { .. } | SketchGeom::Rectangle { .. } => {
-                    return Err("circle/rectangle cannot be mixed inside multi-edge region".to_string());
+                    return Err(
+                        "circle/rectangle cannot be mixed inside multi-edge region".to_string()
+                    );
                 }
             }
         }
@@ -790,6 +804,58 @@ impl SketchSystem {
             return Err("closed region has zero or degenerate area".to_string());
         }
         Ok(poly)
+    }
+}
+
+struct SolverVariables {
+    map: Vec<(VarKind, usize)>,
+    values: Vec<f64>,
+    point_vars: Vec<(Option<usize>, Option<usize>)>,
+    circle_vars: Vec<Option<usize>>,
+}
+
+impl SolverVariables {
+    fn new(sketch: &SketchSystem) -> Self {
+        let mut variables = Self {
+            map: Vec::new(),
+            values: Vec::new(),
+            point_vars: vec![(None, None); sketch.points.len()],
+            circle_vars: vec![None; sketch.geoms.len()],
+        };
+        for point in &sketch.points {
+            if !point.fixed {
+                let x = variables.map.len();
+                variables
+                    .map
+                    .extend([(VarKind::PointX, point.id), (VarKind::PointY, point.id)]);
+                let position = sketch.points[point.id];
+                variables.values.extend([position.x, position.y]);
+                variables.point_vars[point.id] = (Some(x), Some(x + 1));
+            }
+        }
+        for geom in &sketch.geoms {
+            if let SketchGeom::Circle {
+                id,
+                radius_fixed: false,
+                ..
+            } = geom
+            {
+                let radius_index = variables.map.len();
+                variables.map.push((VarKind::CircleRadius, *id));
+                if let SketchGeom::Circle { radius, .. } = sketch.geoms[*id] {
+                    variables.values.push(radius);
+                }
+                variables.circle_vars[*id] = Some(radius_index);
+            }
+        }
+        variables
+    }
+
+    fn lookup(&self) -> VarLookup<'_> {
+        VarLookup {
+            point_vars: &self.point_vars,
+            circle_vars: &self.circle_vars,
+        }
     }
 }
 

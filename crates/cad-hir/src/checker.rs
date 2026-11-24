@@ -9,6 +9,7 @@ use std::collections::HashMap;
 pub struct CheckOutput {
     pub module: IrModule,
     pub diagnostics: Vec<Diagnostic>,
+    pub import_argument_hovers: Vec<ImportArgumentHover>,
 }
 
 pub fn classify_expr(expr: &Expr) -> TierClassification {
@@ -133,6 +134,7 @@ struct Checker {
     diagnostics: Vec<Diagnostic>,
     env_stack: Vec<Env>,
     hover_symbols: Vec<HoverInfo>,
+    import_argument_hovers: Vec<ImportArgumentHover>,
     edit_handles: Vec<EditHandleCandidate>,
     next_node_id: usize,
 }
@@ -153,6 +155,7 @@ impl Checker {
             diagnostics: Vec::new(),
             env_stack: vec![root_env],
             hover_symbols: Vec::new(),
+            import_argument_hovers: Vec::new(),
             edit_handles: Vec::new(),
             next_node_id: 0,
         }
@@ -617,35 +620,7 @@ impl Checker {
                 span,
             } => {
                 let recv = self.check_expr(receiver);
-                let checked_args: Vec<IrArg> = args
-                    .iter()
-                    .map(|a| {
-                        // Allow bare axis/coord identifiers like `coord = Z` or `max_by(radius)`
-                        let val = if let Expr::Path { segments, span: arg_span } = &a.value {
-                            if segments.len() == 1
-                                && matches!(
-                                    segments[0].as_str(),
-                                    "X" | "Y" | "Z" | "radius" | "area"
-                                )
-                            {
-                                IrExpr::ConstDir {
-                                    name: segments[0].clone(),
-                                    ty: DimType::Direction,
-                                    span: *arg_span,
-                                }
-                            } else {
-                                self.check_expr(&a.value)
-                            }
-                        } else {
-                            self.check_expr(&a.value)
-                        };
-                        IrArg {
-                            name: a.name.clone(),
-                            value: val,
-                            span: a.span,
-                        }
-                    })
-                    .collect();
+                let checked_args = self.lower_call_args(args, true);
                 let ty = infer_method_type(recv.ty(), method);
                 IrExpr::MethodCall {
                     receiver: Box::new(recv),
@@ -811,6 +786,33 @@ impl Checker {
         }
     }
 
+    fn lower_call_args(&mut self, args: &[CallArg], allow_selector_keys: bool) -> Vec<IrArg> {
+        args.iter()
+            .map(|arg| {
+                // Selector sort keys such as `radius` are not variable references.
+                let value = match &arg.value {
+                    Expr::Path { segments, span }
+                        if allow_selector_keys
+                            && segments.len() == 1
+                            && matches!(segments[0].as_str(), "X" | "Y" | "Z" | "radius" | "area") =>
+                    {
+                        IrExpr::ConstDir {
+                            name: segments[0].clone(),
+                            ty: DimType::Direction,
+                            span: *span,
+                        }
+                    }
+                    other => self.check_expr(other),
+                };
+                IrArg {
+                    name: arg.name.clone(),
+                    value,
+                    span: arg.span,
+                }
+            })
+            .collect()
+    }
+
     fn check_call(
         &mut self,
         callee: &Expr,
@@ -823,14 +825,15 @@ impl Checker {
             _ => "<dynamic>".to_string(),
         };
 
-        let checked_args: Vec<IrArg> = args
-            .iter()
-            .map(|a| IrArg {
-                name: a.name.clone(),
-                value: self.check_expr(&a.value),
-                span: a.span,
-            })
-            .collect();
+        let selector_receiver = match callee_name.as_str() {
+            "faces" => Some(DimType::Solid),
+            "planar" | "cylindrical" | "conical" | "filter" | "tagged" | "max_by" | "min_by" => {
+                Some(DimType::FaceSet)
+            }
+            _ => None,
+        };
+        let selector_is_piped = piped_input.is_some() && selector_receiver.is_some();
+        let mut checked_args = self.lower_call_args(args, selector_is_piped);
 
         // Check Phase 2 graceful degradation
         let mut is_phase2_fallback = false;
@@ -852,15 +855,36 @@ impl Checker {
             );
         }
 
-        // Validate key argument dimensional constraints
-        self.validate_call_args(&callee_name, &checked_args, span);
+        if let Some(parameters) = import_parameters(&callee_name) {
+            self.check_import_args(&callee_name, parameters, &mut checked_args, span);
+        } else if callee_name == "tag::faces" {
+            self.check_tag_faces_args(&checked_args, piped_input, span);
+        } else if matches!(callee_name.as_str(), "face::offset" | "face::move" | "face::delete") {
+            self.check_face_edit_args(&callee_name, &checked_args, piped_input, span);
+        } else if callee_name == "assert::no_interference" {
+            self.check_interference_args(&checked_args, piped_input, span);
+        } else {
+            self.validate_call_args(&callee_name, &checked_args, span);
+        }
 
-        let ret_ty = match infer_call_return_type(&callee_name, piped_input) {
-            DimType::Unknown => self
-                .lookup_var(&callee_name)
-                .cloned()
-                .unwrap_or(DimType::Unknown),
-            other => other,
+        let ret_ty = if let (Some(expected), Some(actual)) = (selector_receiver, piped_input) {
+            if !types_compatible(&expected, actual) {
+                self.emit(
+                    "E_ARG_TYPE_MISMATCH",
+                    Severity::Error,
+                    format!("`{callee_name}` expects `{expected}` as pipe input, found `{actual}`"),
+                    span,
+                );
+            }
+            DimType::FaceSet
+        } else {
+            match infer_call_return_type(&callee_name, piped_input) {
+                DimType::Unknown => self
+                    .lookup_var(&callee_name)
+                    .cloned()
+                    .unwrap_or(DimType::Unknown),
+                other => other,
+            }
         };
         IrExpr::Call {
             callee: callee_name,
@@ -871,9 +895,321 @@ impl Checker {
         }
     }
 
-    fn validate_call_args(&mut self, callee: &str, args: &[IrArg], _span: Span) {
+    fn check_import_args(
+        &mut self,
+        callee: &str,
+        parameters: &'static [ImportParameter],
+        args: &mut [IrArg],
+        span: Span,
+    ) {
+        let mut seen = vec![false; parameters.len()];
+        for (index, arg) in args.iter_mut().enumerate() {
+            let param_index = if let Some(name) = arg.name.as_deref() {
+                parameters.iter().position(|p| p.name == name)
+            } else {
+                (index < parameters.len()).then_some(index)
+            };
+            let Some(param_index) = param_index else {
+                self.emit(
+                    "E_ARG_UNKNOWN",
+                    Severity::Error,
+                    match &arg.name {
+                        Some(name) => format!("`{callee}` has no parameter `{name}`"),
+                        None => format!("`{callee}` has no positional parameter {}", index + 1),
+                    },
+                    arg.span,
+                );
+                continue;
+            };
+            let parameter = &parameters[param_index];
+            if arg.name.is_some() {
+                let name_len = parameter.name.len(); // Parameter labels are ASCII.
+                self.import_argument_hovers.push(ImportArgumentHover {
+                    parameter,
+                    span: Span::new(
+                        arg.span.start_line,
+                        arg.span.start_col,
+                        arg.span.start_line,
+                        arg.span.start_col + name_len,
+                        arg.span.start_byte,
+                        arg.span.start_byte + name_len,
+                    ),
+                });
+            }
+            if std::mem::replace(&mut seen[param_index], true) {
+                self.emit(
+                    "E_ARG_DUPLICATE",
+                    Severity::Error,
+                    format!("`{callee}` parameter `{}` was supplied more than once", parameter.name),
+                    arg.span,
+                );
+            }
+            self.check_argument_type(callee, parameter.name, &parameter.ty, arg);
+            // Give the evaluator one representation for both argument spellings.
+            arg.name = Some(parameter.name.to_owned());
+        }
+        for (parameter, supplied) in parameters.iter().zip(seen) {
+            if parameter.required && !supplied {
+                self.emit(
+                    "E_ARG_MISSING",
+                    Severity::Error,
+                    format!("`{callee}` requires parameter `{}`", parameter.name),
+                    span,
+                );
+            }
+        }
+    }
+
+    fn check_tag_faces_args(&mut self, args: &[IrArg], piped_input: Option<&DimType>, span: Span) {
+        let mut seen_tag = false;
+        let mut seen_faces = false;
+        for (index, arg) in args.iter().enumerate() {
+            let (name, ty, seen) = match (arg.name.as_deref(), index) {
+                (Some("tag"), _) | (None, 0) => ("tag", DimType::Str, &mut seen_tag),
+                (Some("faces"), _) => ("faces", DimType::FaceSet, &mut seen_faces),
+                (name, _) => {
+                    self.emit(
+                        "E_ARG_UNKNOWN",
+                        Severity::Error,
+                        match name {
+                            Some(name) => format!("`tag::faces` has no parameter `{name}`"),
+                            None => format!("`tag::faces` has no positional parameter {}", index + 1),
+                        },
+                        arg.span,
+                    );
+                    continue;
+                }
+            };
+            if std::mem::replace(seen, true) {
+                self.emit(
+                    "E_ARG_DUPLICATE",
+                    Severity::Error,
+                    format!("`tag::faces` parameter `{name}` was supplied more than once"),
+                    arg.span,
+                );
+            }
+            self.check_argument_type("tag::faces", name, &ty, arg);
+        }
+        if seen_faces && !seen_tag {
+            self.emit(
+                "E_ARG_MISSING",
+                Severity::Error,
+                "`tag::faces` with a face subset requires parameter `tag`",
+                span,
+            );
+        }
+        if seen_faces && !matches!(piped_input, Some(DimType::Solid | DimType::Unknown)) {
+            self.emit(
+                "E_ARG_TYPE_MISMATCH",
+                Severity::Error,
+                "`tag::faces` with a face subset requires a Solid as pipe input",
+                span,
+            );
+        }
+    }
+
+    fn check_face_edit_args(&mut self, callee: &str, args: &[IrArg], piped_input: Option<&DimType>, span: Span) {
+        let extra = match callee {
+            "face::offset" => Some(("delta", DimType::Length)),
+            "face::move" => Some(("offset", DimType::Array(Box::new(DimType::Length)))),
+            _ => None,
+        };
+        let parameters = [("faces", DimType::FaceSet)].into_iter().chain(extra).collect::<Vec<_>>();
+        let mut seen = [false; 2];
+        if !matches!(piped_input, Some(DimType::Solid | DimType::Unknown)) {
+            self.emit(
+                "E_ARG_TYPE_MISMATCH",
+                Severity::Error,
+                format!("`{callee}` requires a Solid as pipe input"),
+                span,
+            );
+        }
         for arg in args {
-            let Some(name) = arg.name.as_deref() else {
+            let Some(index) = parameters
+                .iter()
+                .position(|(name, _)| Some(*name) == arg.name.as_deref())
+            else {
+                self.emit(
+                    "E_ARG_UNKNOWN",
+                    Severity::Error,
+                    match arg.name.as_deref() {
+                        Some(name) => format!("`{callee}` has no parameter `{name}`"),
+                        None => format!("`{callee}` requires named parameters"),
+                    },
+                    arg.span,
+                );
+                continue;
+            };
+            let (name, ty) = &parameters[index];
+            if std::mem::replace(&mut seen[index], true) {
+                self.emit(
+                    "E_ARG_DUPLICATE",
+                    Severity::Error,
+                    format!("`{callee}` parameter `{name}` was supplied more than once"),
+                    arg.span,
+                );
+            }
+            if *name == "offset" {
+                let valid = match &arg.value {
+                    IrExpr::Array { elements, .. } => elements.len() == 3 && elements.iter()
+                        .all(|element| matches!(element.ty(), DimType::Length | DimType::Unknown)),
+                    value => matches!(value.ty(), DimType::Unknown)
+                        || matches!(value.ty(), DimType::Array(element) if **element == DimType::Length),
+                };
+                if !valid {
+                    self.emit("E_ARG_TYPE_MISMATCH", Severity::Error,
+                        "`face::move` requires `offset` with three lengths", arg.value.span());
+                }
+            } else {
+                self.check_argument_type(callee, name, ty, arg);
+            }
+        }
+        for ((name, _), supplied) in parameters.into_iter().zip(seen) {
+            if !supplied {
+                self.emit(
+                    "E_ARG_MISSING",
+                    Severity::Error,
+                    format!("`{callee}` requires parameter `{name}`"),
+                    span,
+                );
+            }
+        }
+    }
+
+    fn check_interference_args(&mut self, args: &[IrArg], piped_input: Option<&DimType>, span: Span) {
+        const CALLEE: &str = "assert::no_interference";
+        const REQUIRED: [&str; 3] = ["a", "b", "min_clearance"];
+        let mut seen = [false; REQUIRED.len()];
+        if piped_input.is_some() {
+            self.emit(
+                "E_ARG_UNKNOWN",
+                Severity::Error,
+                format!("`{CALLEE}` does not take a pipe input; specify `a` and `b` by name"),
+                span,
+            );
+        }
+        for arg in args {
+            let Some(index) = REQUIRED
+                .iter()
+                .position(|&name| Some(name) == arg.name.as_deref())
+            else {
+                self.emit(
+                    "E_ARG_UNKNOWN",
+                    Severity::Error,
+                    match arg.name.as_deref() {
+                        Some(name) => format!("`{CALLEE}` has no parameter `{name}`"),
+                        None => format!("`{CALLEE}` requires named parameters"),
+                    },
+                    arg.span,
+                );
+                continue;
+            };
+            let name = REQUIRED[index];
+            if std::mem::replace(&mut seen[index], true) {
+                self.emit(
+                    "E_ARG_DUPLICATE",
+                    Severity::Error,
+                    format!("`{CALLEE}` parameter `{name}` was supplied more than once"),
+                    arg.span,
+                );
+            }
+            if name == "min_clearance" {
+                self.check_argument_type(CALLEE, name, &DimType::Length, arg);
+                if eval_const_preview(&arg.value).is_some_and(|v| !v.is_finite() || v < 0.0) {
+                    self.emit(
+                        "E103_INVALID_VALUE",
+                        Severity::Error,
+                        "`min_clearance` must be a finite, nonnegative length",
+                        arg.value.span(),
+                    );
+                }
+            } else if !matches!(
+                arg.value.ty(),
+                DimType::Solid | DimType::Component | DimType::Unknown
+            ) {
+                self.emit(
+                    "E_ARG_TYPE_MISMATCH",
+                    Severity::Error,
+                    format!(
+                        "`{CALLEE}` parameter `{name}` expects `Solid` or `Component`, found `{}`",
+                        arg.value.ty()
+                    ),
+                    arg.value.span(),
+                );
+            }
+        }
+        for (name, supplied) in REQUIRED.into_iter().zip(seen) {
+            if !supplied {
+                self.emit(
+                    "E_ARG_MISSING",
+                    Severity::Error,
+                    format!("`{CALLEE}` requires parameter `{name}`"),
+                    span,
+                );
+            }
+        }
+    }
+
+    fn check_argument_type(&mut self, callee: &str, name: &str, expected: &DimType, arg: &IrArg) {
+        let actual = arg.value.ty();
+        if !types_compatible(expected, actual) {
+            let code = if *expected == DimType::Length {
+                "E102_UNIT_MISMATCH"
+            } else {
+                "E_ARG_TYPE_MISMATCH"
+            };
+            self.emit(
+                code,
+                Severity::Error,
+                format!("`{callee}` parameter `{name}` expects `{expected}`, found `{actual}`"),
+                arg.value.span(),
+            );
+        }
+    }
+
+    fn validate_call_args(&mut self, callee: &str, args: &[IrArg], span: Span) {
+        if callee == "path::helix" {
+            let has_turns_or_height = args.iter().enumerate().any(|(idx, a)| {
+                matches!(a.name.as_deref(), Some("turns" | "height" | "h"))
+                    || (a.name.is_none() && idx == 2)
+            });
+            if !has_turns_or_height {
+                self.emit(
+                    "E103_INVALID_VALUE",
+                    Severity::Error,
+                    "call to `path::helix` requires at least one of `turns` or `height` (or `h`)",
+                    span,
+                );
+            }
+        } else if callee == "path::spline3d" {
+            let has_points = args.iter().enumerate().any(|(idx, a)| {
+                matches!(
+                    a.name.as_deref(),
+                    Some("points" | "control_points" | "pts")
+                ) || (a.name.is_none() && idx == 0)
+            });
+            if !has_points {
+                self.emit(
+                    "E103_INVALID_VALUE",
+                    Severity::Error,
+                    "call to `path::spline3d` requires `points` (or `control_points` / `pts`)",
+                    span,
+                );
+            }
+        }
+
+        for (idx, arg) in args.iter().enumerate() {
+            let effective_name = arg.name.as_deref().or_else(|| match (callee, idx) {
+                ("spline" | "profile::spline" | "path::spline3d" | "path::polyline", 0) => {
+                    Some("points")
+                }
+                ("path::helix", 0) => Some("radius"),
+                ("path::helix", 1) => Some("pitch"),
+                ("path::helix", 2) => Some("turns"),
+                ("path::helix", 3) => Some("origin"),
+                _ => None,
+            });
+            let Some(name) = effective_name else {
                 continue;
             };
             let ty = arg.value.ty();
@@ -907,6 +1243,179 @@ impl Checker {
                             "E102_UNIT_MISMATCH",
                             Severity::Error,
                             format!("argument `{name}` of `{callee}` expects `Length`, found `{ty}`"),
+                            arg.span,
+                        );
+                    }
+                }
+                (
+                    "ellipse" | "profile::ellipse",
+                    "rx" | "ry" | "major_radius" | "minor_radius" | "a" | "b",
+                ) => {
+                    if *ty != DimType::Length {
+                        self.emit(
+                            "E102_UNIT_MISMATCH",
+                            Severity::Error,
+                            format!(
+                                "argument `{name}` of `{callee}` expects `Length`, found `{ty}`"
+                            ),
+                            arg.span,
+                        );
+                    } else if let Some(v) = eval_const_preview(&arg.value) {
+                        if !v.is_finite() || v <= 0.0 {
+                            self.emit(
+                                "E103_INVALID_VALUE",
+                                Severity::Error,
+                                format!(
+                                    "argument `{name}` of `{callee}` must be positive, found {v}"
+                                ),
+                                arg.span,
+                            );
+                        }
+                    }
+                }
+                ("ellipse" | "profile::ellipse", "segments") => {
+                    if !ty.is_numeric_scalar() {
+                        self.emit(
+                            "E_ARG_TYPE_MISMATCH",
+                            Severity::Error,
+                            format!(
+                                "argument `segments` of `{callee}` expects integer/scalar, found `{ty}`"
+                            ),
+                            arg.span,
+                        );
+                    }
+                }
+                ("profile::ellipse" | "profile::spline", "plane") => {
+                    if *ty != DimType::Plane {
+                        self.emit(
+                            "E_ARG_TYPE_MISMATCH",
+                            Severity::Error,
+                            format!("argument `plane` of `{callee}` expects `Plane`, found `{ty}`"),
+                            arg.span,
+                        );
+                    }
+                }
+                ("spline", "plane") => {
+                    self.emit(
+                        "E_ARG_TYPE_MISMATCH",
+                        Severity::Error,
+                        "argument `plane` is only supported on `profile::spline`, not sketch entity `spline`",
+                        arg.span,
+                    );
+                }
+                (
+                    "spline" | "profile::spline",
+                    "points" | "control_points" | "pts",
+                ) => {
+                    self.check_spline_points(callee, name, &arg.value, arg.span);
+                }
+                (
+                    "path::spline3d",
+                    "points" | "control_points" | "pts",
+                ) => {
+                    self.check_spline3d_points(callee, name, &arg.value, arg.span);
+                }
+                ("spline" | "profile::spline", "closed") => {
+                    if *ty != DimType::Bool {
+                        self.emit(
+                            "E_ARG_TYPE_MISMATCH",
+                            Severity::Error,
+                            format!(
+                                "argument `closed` of `{callee}` expects `bool`, found `{ty}`"
+                            ),
+                            arg.span,
+                        );
+                    }
+                }
+                (
+                    "spline" | "profile::spline" | "path::spline3d",
+                    "segments_per_span" | "segments",
+                ) => {
+                    if !ty.is_numeric_scalar() {
+                        self.emit(
+                            "E_ARG_TYPE_MISMATCH",
+                            Severity::Error,
+                            format!(
+                                "argument `{name}` of `{callee}` expects integer/scalar, found `{ty}`"
+                            ),
+                            arg.span,
+                        );
+                    } else if let Some(v) = eval_const_preview(&arg.value) {
+                        if !v.is_finite() || v <= 0.0 {
+                            self.emit(
+                                "E103_INVALID_VALUE",
+                                Severity::Error,
+                                format!(
+                                    "argument `{name}` of `{callee}` must be positive, found {v}"
+                                ),
+                                arg.span,
+                            );
+                        }
+                    }
+                }
+                (
+                    "path::helix",
+                    "radius" | "r" | "d" | "diameter" | "pitch" | "height" | "h",
+                ) => {
+                    if *ty != DimType::Length {
+                        self.emit(
+                            "E102_UNIT_MISMATCH",
+                            Severity::Error,
+                            format!(
+                                "argument `{name}` of `{callee}` expects `Length`, found `{ty}`"
+                            ),
+                            arg.span,
+                        );
+                    } else if let Some(v) = eval_const_preview(&arg.value) {
+                        if !v.is_finite() || v <= 0.0 {
+                            self.emit(
+                                "E103_INVALID_VALUE",
+                                Severity::Error,
+                                format!(
+                                    "argument `{name}` of `{callee}` must be positive, found {v}"
+                                ),
+                                arg.span,
+                            );
+                        }
+                    }
+                }
+                (
+                    "path::helix",
+                    "turns" | "segments_per_turn" | "segments",
+                ) => {
+                    if !ty.is_numeric_scalar() {
+                        self.emit(
+                            "E_ARG_TYPE_MISMATCH",
+                            Severity::Error,
+                            format!(
+                                "argument `{name}` of `{callee}` expects integer/scalar, found `{ty}`"
+                            ),
+                            arg.span,
+                        );
+                    } else if let Some(v) = eval_const_preview(&arg.value) {
+                        if !v.is_finite() || v <= 0.0 {
+                            self.emit(
+                                "E103_INVALID_VALUE",
+                                Severity::Error,
+                                format!(
+                                    "argument `{name}` of `{callee}` must be positive, found {v}"
+                                ),
+                                arg.span,
+                            );
+                        }
+                    }
+                }
+                ("path::helix", "origin" | "center") => {
+                    self.check_dim_vector(callee, name, &arg.value, &DimType::Length, 3, arg.span);
+                }
+                ("path::helix", "left_handed") => {
+                    if *ty != DimType::Bool {
+                        self.emit(
+                            "E_ARG_TYPE_MISMATCH",
+                            Severity::Error,
+                            format!(
+                                "argument `left_handed` of `{callee}` expects `bool`, found `{ty}`"
+                            ),
                             arg.span,
                         );
                     }
@@ -954,7 +1463,8 @@ impl Checker {
                     self.check_dim_vector(callee, name, &arg.value, &DimType::Length, 3, arg.span);
                 }
                 // R05: 2D Length vectors inside 2D sketches
-                ("circle" | "rectangle", "center" | "origin" | "size") => {
+                ("circle" | "rectangle", "center" | "origin" | "size")
+                | ("ellipse" | "profile::ellipse", "center" | "origin") => {
                     self.check_dim_vector(callee, name, &arg.value, &DimType::Length, 2, arg.span);
                 }
                 // R05: 3D Force vector
@@ -1079,6 +1589,133 @@ impl Checker {
         }
     }
 
+    fn check_spline_points(
+        &mut self,
+        callee: &str,
+        arg_name: &str,
+        expr: &IrExpr,
+        span: Span,
+    ) {
+        if let IrExpr::Array { elements, .. } = expr {
+            for elem in elements {
+                let et = elem.ty();
+                if *et == DimType::SketchPoint || *et == DimType::Unknown {
+                    continue;
+                }
+                self.check_dim_vector(callee, arg_name, elem, &DimType::Length, 2, elem.span());
+            }
+            if elements.len() < 3 {
+                self.emit(
+                    "E103_INVALID_VALUE",
+                    Severity::Error,
+                    format!(
+                        "argument `{arg_name}` of `{callee}` requires at least 3 control points, found {}",
+                        elements.len()
+                    ),
+                    span,
+                );
+            }
+            return;
+        }
+
+        match expr.ty() {
+            DimType::Unknown => {}
+            DimType::Array(inner) => {
+                let ok = match inner.as_ref() {
+                    DimType::SketchPoint | DimType::Unknown => true,
+                    DimType::Array(coord) => {
+                        matches!(coord.as_ref(), DimType::Length | DimType::Unknown)
+                    }
+                    _ => false,
+                };
+                if !ok {
+                    self.emit(
+                        "E102_UNIT_MISMATCH",
+                        Severity::Error,
+                        format!(
+                            "argument `{arg_name}` of `{callee}` expects `[Point2D]` or `[[Length; 2]]`, found `{}`",
+                            expr.ty()
+                        ),
+                        span,
+                    );
+                }
+            }
+            other => {
+                self.emit(
+                    "E102_UNIT_MISMATCH",
+                    Severity::Error,
+                    format!(
+                        "argument `{arg_name}` of `{callee}` expects `[Point2D]` or `[[Length; 2]]`, found `{other}`"
+                    ),
+                    span,
+                );
+            }
+        }
+    }
+
+    fn check_spline3d_points(
+        &mut self,
+        callee: &str,
+        arg_name: &str,
+        expr: &IrExpr,
+        span: Span,
+    ) {
+        if let IrExpr::Array { elements, .. } = expr {
+            for elem in elements {
+                if *elem.ty() == DimType::Unknown {
+                    continue;
+                }
+                self.check_dim_vector(callee, arg_name, elem, &DimType::Length, 3, elem.span());
+            }
+            if elements.len() < 3 {
+                self.emit(
+                    "E103_INVALID_VALUE",
+                    Severity::Error,
+                    format!(
+                        "argument `{arg_name}` of `{callee}` requires at least 3 3D control points, found {}",
+                        elements.len()
+                    ),
+                    span,
+                );
+            }
+            return;
+        }
+
+        match expr.ty() {
+            DimType::Unknown => {}
+            DimType::Array(inner) => {
+                let ok = match inner.as_ref() {
+                    DimType::Unknown => true,
+                    DimType::Array(coord) => {
+                        matches!(coord.as_ref(), DimType::Length | DimType::Unknown)
+                    }
+                    _ => false,
+                };
+                if !ok {
+                    self.emit(
+                        "E102_UNIT_MISMATCH",
+                        Severity::Error,
+                        format!(
+                            "argument `{arg_name}` of `{callee}` expects `[[Length; 3]]`, found `{}`",
+                            expr.ty()
+                        ),
+                        span,
+                    );
+                }
+            }
+            other => {
+                self.emit(
+                    "E102_UNIT_MISMATCH",
+                    Severity::Error,
+                    format!(
+                        "argument `{arg_name}` of `{callee}` expects `[[Length; 3]]`, found `{other}`"
+                    ),
+                    span,
+                );
+            }
+        }
+    }
+
     fn check_sketch(&mut self, args: &[CallArg], body: &cad_syntax::Block, span: Span) -> IrExpr {
         let checked_args: Vec<IrArg> = args
             .iter()
@@ -1174,11 +1811,16 @@ fn infer_call_return_type(callee: &str, piped_input: Option<&DimType>) -> DimTyp
         "box" | "cylinder" | "extrude" | "extrude_symmetric" | "revolve" | "sweep" | "loft"
         | "shell" | "mirror" | "fillet" | "chamfer" | "hole::simple" | "hole::counterbore"
         | "hole::tapped" | "array::linear" | "array::polar" | "boolean::union"
-        | "boolean::subtract" | "implicit::smooth_union" => DimType::Solid,
-        "profile::circle" | "profile::rect" => DimType::Sketch2D,
-        "path::polyline" | "path::line" | "path::arc" => {
+        | "boolean::subtract" | "implicit::smooth_union" | "import::step" | "import::mesh" => {
+            DimType::Solid
+        }
+        "profile::circle" | "profile::rect" | "profile::ellipse" | "profile::spline" => {
+            DimType::Sketch2D
+        }
+        "path::polyline" | "path::line" | "path::arc" | "path::helix" | "path::spline3d" => {
             DimType::Array(Box::new(DimType::Array(Box::new(DimType::Length))))
         }
+        "face::offset" | "face::move" | "face::delete" => DimType::Solid,
         "component" => DimType::Component,
         "assembly::merge" => DimType::Assembly,
         _ if callee.starts_with("mate::") => DimType::Bool,
@@ -1189,7 +1831,10 @@ fn infer_call_return_type(callee: &str, piped_input: Option<&DimType>) -> DimTyp
             piped_input.cloned().unwrap_or(DimType::FaceSet)
         }
         "point" => DimType::SketchPoint,
-        "line" | "arc" | "circle" | "rectangle" | "region::closed" | "region::path" => DimType::SketchEntity,
+        "line" | "arc" | "circle" | "ellipse" | "spline" | "rectangle" | "region::closed"
+        | "region::path" => {
+            DimType::SketchEntity
+        }
         "field::stress_driven" => DimType::Length,
         "force::distributed" => DimType::ForceLoad,
         _ if callee.starts_with("constraint::") || callee.starts_with("assert::") => DimType::Bool,
@@ -1233,5 +1878,6 @@ pub fn check_and_lower(file: &SourceFile) -> CheckOutput {
     CheckOutput {
         module,
         diagnostics: checker.diagnostics,
+        import_argument_hovers: checker.import_argument_hovers,
     }
 }

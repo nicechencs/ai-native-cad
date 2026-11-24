@@ -9,7 +9,16 @@
     "dev": "pnpm --filter @ai-native-cad/studio-ui dev",
     "dev:server": "node apps/studio-ui/dev-server.mjs",
     "build": "pnpm --filter @ai-native-cad/studio-ui build",
-    "typecheck": "pnpm --filter @ai-native-cad/studio-ui typecheck"
+    "build:cli": "cargo build --release -p cad-cli",
+    "build:desktop": "pnpm --filter @ai-native-cad/studio-ui build && cargo build --release --manifest-path apps/desktop/src-tauri/Cargo.toml --features custom-protocol",
+    "package": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-release.ps1 -WithOcct",
+    "package:cli": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-release.ps1 -CliOnly -WithOcct",
+    "typecheck": "pnpm -r --parallel typecheck",
+    "test:gate": "node scripts/ci/run_python.mjs scripts/ci/run_local_gate.py",
+    "test:e2e": "pnpm --filter @ai-native-cad/web-e2e run test",
+    "test:e2e:smoke": "pnpm --filter @ai-native-cad/web-e2e run test:smoke",
+    "test:functional": "node scripts/ci/run_python.mjs tests/functional/run_suite.py --tier smoke --jobs auto",
+    "test:functional:full": "node scripts/ci/run_python.mjs tests/functional/run_suite.py --tier full --jobs auto"
   },
   "engines": {
     "node": ">=22.0.0",

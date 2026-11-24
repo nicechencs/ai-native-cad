@@ -4,11 +4,41 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+implicit = ["dep:cad-implicit"]
+subd = ["dep:cad-subd"]
+experimental = ["implicit", "subd"]
+occt-ffi = ["cad-kernel-occt/occt-ffi"]
+
 [dependencies]
+cad-assembly-solver.workspace = true
+cad-container.workspace = true
+cad-ir.workspace = true
+cad-kcl-bridge.workspace = true
+cad-topo.workspace = true
+cad-stdlib.workspace = true
+cad-implicit = { workspace = true, optional = true }
+cad-subd = { workspace = true, optional = true }
 cad-syntax.workspace = true
 cad-hir.workspace = true
 cad-gcs.workspace = true
 cad-kernel-occt.workspace = true
-cad-render.workspace = true
+cad-mesh-io.workspace = true
+cad-observe.workspace = true
+cad-scene-mesh.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
 thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+cad-observe = { workspace = true, features = ["sink"] }
+tracing-subscriber.workspace = true
+
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }

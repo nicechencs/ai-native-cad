@@ -1,0 +1,12 @@
+[
+  {
+    "id": "engraving",
+    "label": "刻字／凸字",
+    "pattern": "刻字|刻印|镭雕|雕刻|凹字|凸字|浮雕|文字\\s*(?:凹刻|凸起|雕刻|轮廓)|\\b(?:engrav(?:e[ds]?|ing)|emboss(?:ed|ing)?|deboss(?:ed|ing)?|lettering|raised text|recessed text)\\b"
+  },
+  {
+    "id": "modeled_thread",
+    "label": "实体螺纹牙形",
+    "pattern": "(?:真实|精确|实体|建模)\\s*(?:内|外)?螺纹(?!\\s*(?:孔|标注))|螺纹\\s*牙(?:形|型)|\\b(?:real|modeled|modelled|explicit|geometric)\\s+(?:screw\\s+)?threads?\\b|\\bthread\\s+(?:profile|geometry)\\b"
+  }
+]

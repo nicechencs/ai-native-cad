@@ -25,6 +25,17 @@ impl Mat4 {
         r
     }
 
+    pub fn reflect(plane: SketchPlane) -> Self {
+        let mut out = Self::identity();
+        let axis = match plane {
+            SketchPlane::Yz => 0,
+            SketchPlane::Xz => 1,
+            SketchPlane::Xy => 2,
+        };
+        out.m[axis][axis] = -1.0;
+        out
+    }
+
     pub fn rotate_axis(axis: [f64; 3], angle_rad: f64) -> Self {
         let len = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2])
             .sqrt()
@@ -78,6 +89,12 @@ impl Mat4 {
         ];
         let len = (r[0] * r[0] + r[1] * r[1] + r[2] * r[2]).sqrt().max(1e-12);
         [r[0] / len, r[1] / len, r[2] / len]
+    }
+
+    pub(crate) fn linear_determinant(&self) -> f64 {
+        let [a, b, c, _] = self.m;
+        a[0] * (b[1] * c[2] - b[2] * c[1]) - a[1] * (b[0] * c[2] - b[2] * c[0])
+            + a[2] * (b[0] * c[1] - b[1] * c[0])
     }
 
     pub fn inverse_rigid(&self) -> Mat4 {
@@ -151,6 +168,17 @@ pub enum CsgNode {
     Mesh {
         bbox: BBox3,
         triangles: Vec<[[f64; 3]; 3]>,
+        closed: bool,
+    },
+    /// Native envelope and exact volume; the triangles are only for point queries
+    /// and never used to reconstruct the native B-Rep. `native` keeps the exact
+    /// shape this node was built from, so groups of native nodes (assemblies)
+    /// can still be checked and exported through OCCT.
+    Occt {
+        bbox: BBox3,
+        volume_mm3: f64,
+        triangles: std::sync::Arc<[[[f64; 3]; 3]]>,
+        native: Option<std::sync::Arc<crate::OcctShapeGuard>>,
     },
 }
 
@@ -301,7 +329,7 @@ impl CsgNode {
                     },
                 }
             }
-            CsgNode::Mesh { bbox, .. } => *bbox,
+            CsgNode::Mesh { bbox, .. } | CsgNode::Occt { bbox, .. } => *bbox,
         }
     }
 
@@ -430,18 +458,25 @@ impl CsgNode {
                 };
                 child.contains(rp)
             }
-            CsgNode::Mesh { bbox, triangles } => {
-                if p[0] < bbox.min[0]
-                    || p[0] > bbox.max[0]
-                    || p[1] < bbox.min[1]
-                    || p[1] > bbox.max[1]
-                    || p[2] < bbox.min[2]
-                    || p[2] > bbox.max[2]
-                {
-                    return false;
-                }
-                point_in_closed_mesh_ray_x(p, triangles)
-            }
+            CsgNode::Mesh {
+                bbox,
+                triangles,
+                closed,
+            } => *closed && mesh_contains(p, bbox, triangles),
+            CsgNode::Occt {
+                bbox,
+                triangles,
+                volume_mm3,
+                ..
+            } => *volume_mm3 > 0.0 && mesh_contains(p, bbox, triangles),
+        }
+    }
+
+    pub(crate) fn is_closed_mesh(&self) -> bool {
+        match self {
+            Self::Mesh { closed, .. } => *closed,
+            Self::Transform { child, .. } | Self::Reflect { child, .. } => child.is_closed_mesh(),
+            _ => false,
         }
     }
 
@@ -496,7 +531,20 @@ impl CsgNode {
             CsgNode::Transform { child, .. } | CsgNode::Reflect { child, .. } => {
                 child.compute_volume()
             }
-            CsgNode::Mesh { triangles, .. } => closed_mesh_volume(triangles),
+            CsgNode::Mesh {
+                triangles, closed, ..
+            } => {
+                if *closed {
+                    closed_mesh_volume(triangles)
+                } else {
+                    0.0
+                }
+            }
+            CsgNode::Occt { volume_mm3, .. } => *volume_mm3,
+            // Cell-center estimate, not an exact Boolean volume. The 64³
+            // lattice is approximate; scripts/geometry derives the tier-1
+            // parts in closed form and compares those with OCCT mass
+            // properties. Do not treat this value as an exact oracle.
             CsgNode::Union(_) | CsgNode::Subtract { .. } => {
                 let bb = self.bbox();
                 let sz = bb.size();
@@ -585,7 +633,15 @@ pub fn point_in_polygon_2d(px: f64, py: f64, poly: &[[f64; 2]]) -> bool {
 }
 
 #[derive(Debug, Clone)]
+pub enum KernelPayload {
+    Analytic,
+    Occt(std::sync::Arc<crate::OcctShapeGuard>),
+    TriMesh,
+}
+
+#[derive(Debug, Clone)]
 pub struct SolidShape {
+    pub payload: KernelPayload,
     pub part_name: String,
     pub csg: CsgNode,
     pub faces: Vec<BRepFace>,
@@ -599,6 +655,7 @@ pub struct SolidShape {
 impl SolidShape {
     pub fn empty(name: impl Into<String>) -> Self {
         Self {
+            payload: KernelPayload::Analytic,
             part_name: name.into(),
             csg: CsgNode::Empty,
             faces: Vec::new(),
@@ -609,6 +666,11 @@ impl SolidShape {
             mates: Vec::new(),
         }
     }
+}
+
+fn mesh_contains(p: [f64; 3], bbox: &BBox3, triangles: &[[[f64; 3]; 3]]) -> bool {
+    (0..3).all(|i| (bbox.min[i]..=bbox.max[i]).contains(&p[i]))
+        && point_in_closed_mesh_ray_x(p, triangles)
 }
 
 fn closed_mesh_volume(triangles: &[[[f64; 3]; 3]]) -> f64 {

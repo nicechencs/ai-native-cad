@@ -1,5 +1,5 @@
+import materialsCatalog from "../../../../schemas/materials.json" with { type: "json" };
 import type {
-  DesignContract,
   DiagnosticsReport,
   EditHandle,
   FaceMesh,
@@ -9,36 +9,15 @@ import type {
   TopoEdge,
 } from "../types/scene.ts";
 
-export const MATERIAL_PRESETS: readonly MaterialPreset[] = [
-  {
-    id: "Al-6061-T6",
-    name: "6061-T6 航空铝合金",
-    density_g_cm3: 2.7,
-    yield_strength_mpa: 276,
-    machinability_index: 90,
-  },
-  {
-    id: "Al-7075-T651",
-    name: "7075-T651 超硬铝合金",
-    density_g_cm3: 2.81,
-    yield_strength_mpa: 503,
-    machinability_index: 75,
-  },
-  {
-    id: "SUS304",
-    name: "SUS304 奥氏体不锈钢",
-    density_g_cm3: 7.93,
-    yield_strength_mpa: 215,
-    machinability_index: 45,
-  },
-  {
-    id: "Ti-6Al-4V",
-    name: "TC4 钛合金 (Ti-6Al-4V)",
-    density_g_cm3: 4.43,
-    yield_strength_mpa: 880,
-    machinability_index: 32,
-  },
-];
+export const MATERIAL_PRESETS: readonly MaterialPreset[] = materialsCatalog.materials
+  .filter((entry) => entry.workbench_preset)
+  .map((entry) => ({
+    id: entry.id,
+    name: entry.name,
+    density_g_cm3: entry.density_g_cm3,
+    yield_strength_mpa: entry.yield_strength_mpa,
+    machinability_index: entry.machinability_index,
+  }));
 
 export const INITIAL_DEMO_KCL = `@unit(length = "mm", angle = "deg", force = "N")
 @material("Al-6061-T6")
@@ -83,57 +62,6 @@ part LightweightBearingMount(
     return final_part
 }
 `;
-
-export const DEMO_DESIGN_CONTRACT: DesignContract = {
-  contract_version: "0.1",
-  part_name: "LightweightBearingMount",
-  units: { length: "mm", angle: "deg", force: "N" },
-  material: "Al-6061-T6",
-  manufacturing_method: "CNC_3AXIS_MILLING",
-  keep_in_bbox_mm: {
-    min: [-60, -60, 0],
-    max: [60, 60, 65],
-  },
-  keep_out_zones: [
-    {
-      zone_id: "ko_central_shaft",
-      kind: "cylinder",
-      origin_mm: [0, 0, -2],
-      diameter_mm: 42,
-      height_mm: 54,
-      description: "主轴通孔中心通道避让区",
-    },
-  ],
-  interfaces: [
-    {
-      interface_id: "bearing_seat_wall",
-      kind: "bore",
-      diameter_mm: 42,
-      tolerance: "Ø42 H7",
-      roughness: "Ra1.6",
-      preserve_exact_brep: true,
-    },
-    {
-      interface_id: "flange_datum_base",
-      kind: "datum",
-      tolerance: "Flatness 0.02mm",
-      preserve_exact_brep: true,
-    },
-  ],
-  loads: [
-    {
-      load_id: "load_axial_01",
-      kind: "force",
-      target_interface: "bearing_seat_wall",
-      magnitude: 1500,
-      unit: "N",
-      vector: [0, 0, -1],
-      min_safety_factor: 2.5,
-    },
-  ],
-  summary:
-    "轻量化法兰轴承座：要求 Ø42 H7 精密轴承内孔、110mm 法兰底盘及 3 轴 CNC 刀具可达性校核。",
-};
 
 function findSpanInSource(source: string, needle: string): SourceSpan {
   const idx = source.indexOf(needle);

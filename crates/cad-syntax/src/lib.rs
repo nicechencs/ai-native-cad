@@ -50,9 +50,7 @@ pub fn rewrite_quantity_preserving_unit(
         .find(|c: char| c.is_ascii_alphabetic() || c == '_')
         .unwrap_or(slice.len());
     let unit = &slice[unit_start..];
-    let formatted = if (new_number - new_number.round()).abs() < 1e-9 && slice[..unit_start].contains('.') {
-        format!("{new_number:.1}{unit}")
-    } else if (new_number - new_number.round()).abs() < 1e-9 {
+    let formatted = if (new_number - new_number.round()).abs() < 1e-9 {
         format!("{new_number:.1}{unit}")
     } else {
         format!("{new_number:.4}", new_number = new_number)

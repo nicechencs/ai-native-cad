@@ -5,16 +5,243 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import struct
 import subprocess
+import tempfile
+import zlib
+from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
+from . import observe
 from .contracts import (
+    EXTERNAL_LENGTH_UNITS,
     BBox3D,
     CompileMetrics,
     CompileResult,
+    ContractValidationError,
+    ExternalInterfaceSummary,
     KeepOutZone,
 )
+
+
+ORTHOGONAL_VIEW_NAMES = ("front", "top", "right", "iso")
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+
+def _normalize_view_stem(view_name: str) -> str:
+    """Normalize a view identifier like 'front.png', 'front.svg', or 'front' to 'front'."""
+    stem = Path(view_name).name.lower()
+    for suffix in (".semantic.json", ".mask.png", ".png", ".svg"):
+        if stem.endswith(suffix):
+            return stem[: -len(suffix)]
+    return stem
+
+
+class ShadedViewsBundle(dict[str, bytes]):
+    """`dict[str, bytes]` of 4 shaded view PNGs with optional semantic masks and legend."""
+
+    def __init__(
+        self,
+        images: dict[str, bytes] | None = None,
+        *,
+        semantic_masks: dict[str, bytes] | None = None,
+        semantic_legend: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(images or {})
+        self.semantic_masks: dict[str, bytes] = dict(semantic_masks or {})
+        self.semantic_legend: dict[str, Any] | None = semantic_legend
+
+    def get_view_semantic(
+        self, view_name: str,
+    ) -> tuple[bytes | None, dict[str, Any] | None]:
+        """Return `(mask_png_bytes, legend_doc)` for the requested view stem."""
+        stem = _normalize_view_stem(view_name)
+        mask = self.semantic_masks.get(stem)
+        legend = _extract_view_legend_payload(self.semantic_legend, stem)
+        return (mask, legend)
+
+
+def _has_complete_png_chunks(data: bytes) -> bool:
+    if not data.startswith(_PNG_SIGNATURE):
+        return False
+    offset = len(_PNG_SIGNATURE)
+    has_image_data = False
+    while offset + 12 <= len(data):
+        size, kind = struct.unpack_from(">I4s", data, offset)
+        payload_end = offset + 8 + size
+        if payload_end + 4 > len(data):
+            return False
+        crc, = struct.unpack_from(">I", data, payload_end)
+        if zlib.crc32(memoryview(data)[offset + 4 : payload_end]) != crc:
+            return False
+        if offset == len(_PNG_SIGNATURE):
+            if kind != b"IHDR" or size != 13:
+                return False
+            width, height = struct.unpack_from(">II", data, offset + 8)
+            if width == 0 or height == 0:
+                return False
+        if kind == b"IDAT" and size:
+            has_image_data = True
+        if kind == b"IEND":
+            return size == 0 and has_image_data and payload_end + 4 == len(data)
+        offset = payload_end + 4
+    return False
+
+
+def _extract_view_legend_payload(
+    raw_doc: dict[str, Any] | None,
+    view_stem: str | None = None,
+) -> dict[str, Any] | None:
+    """Normalize `semantic.json` or `<view>.semantic.json` into a single-view legend dict."""
+    if not isinstance(raw_doc, dict):
+        return None
+    if view_stem is None:
+        return raw_doc
+
+    views = raw_doc.get("views")
+    if isinstance(views, list):
+        for entry in views:
+            if not isinstance(entry, dict):
+                continue
+            entry_view = entry.get("view")
+            if isinstance(entry_view, str) and _normalize_view_stem(entry_view) == view_stem:
+                return {
+                    "width": raw_doc.get("width"),
+                    "height": raw_doc.get("height"),
+                    "view": view_stem,
+                    "image": entry.get("image"),
+                    "mask": entry.get("mask"),
+                    "entries": list(entry.get("entries", []))
+                    if isinstance(entry.get("entries"), list)
+                    else [],
+                }
+        return None
+
+    if isinstance(raw_doc.get("entries"), list):
+        doc_view = raw_doc.get("view")
+        if not isinstance(doc_view, str) or _normalize_view_stem(doc_view) == view_stem:
+            return {
+                "width": raw_doc.get("width"),
+                "height": raw_doc.get("height"),
+                "view": view_stem,
+                "image": raw_doc.get("image"),
+                "mask": raw_doc.get("mask"),
+                "entries": list(raw_doc["entries"]),
+            }
+    return None
+
+
+def load_semantic_mask(directory: Path, view_name: str) -> bytes | None:
+    """Load `<view>.mask.png` from `directory`, returning None if missing or corrupt."""
+    stem = _normalize_view_stem(view_name)
+    if not stem:
+        return None
+    mask_path = directory / f"{stem}.mask.png"
+    try:
+        if not mask_path.is_file():
+            return None
+        data = mask_path.read_bytes()
+    except OSError:
+        return None
+    if not _has_complete_png_chunks(data):
+        return None
+    return data
+
+
+def load_semantic_legend(
+    path_or_dir: Path,
+    view_name: str | None = None,
+) -> dict[str, Any] | None:
+    """Load semantic legend JSON from a file or render directory (graceful None on miss)."""
+    stem = _normalize_view_stem(view_name) if view_name is not None else None
+    try:
+        if path_or_dir.is_file():
+            raw = json.loads(path_or_dir.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                return None
+            return _extract_view_legend_payload(raw, stem)
+
+        if not path_or_dir.is_dir():
+            return None
+
+        if stem is not None:
+            per_view_file = path_or_dir / f"{stem}.semantic.json"
+            if per_view_file.is_file():
+                raw = json.loads(per_view_file.read_text(encoding="utf-8"))
+                if isinstance(raw, dict):
+                    extracted = _extract_view_legend_payload(raw, stem)
+                    if extracted is not None:
+                        return extracted
+
+        shared_file = path_or_dir / "semantic.json"
+        if shared_file.is_file():
+            raw = json.loads(shared_file.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                return _extract_view_legend_payload(raw, stem)
+
+        # Merge per-view semantic files when shared `semantic.json` is absent.
+        merged_views: list[dict[str, Any]] = []
+        width: Any = None
+        height: Any = None
+        for name in ORTHOGONAL_VIEW_NAMES:
+            per_view_file = path_or_dir / f"{name}.semantic.json"
+            if not per_view_file.is_file():
+                continue
+            raw = json.loads(per_view_file.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                continue
+            extracted = _extract_view_legend_payload(raw, name)
+            if extracted is not None:
+                width = width if width is not None else extracted.get("width")
+                height = height if height is not None else extracted.get("height")
+                merged_views.append(extracted)
+        if merged_views:
+            return {"width": width, "height": height, "views": merged_views}
+        return None
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def load_view_semantic_artifacts(
+    directory: Path,
+    view_name: str,
+) -> tuple[bytes, dict[str, Any] | None] | None:
+    """Load `(mask_png_bytes, view_legend)` for a single view from `directory`."""
+    mask_bytes = load_semantic_mask(directory, view_name)
+    if mask_bytes is None:
+        return None
+    legend = load_semantic_legend(directory, view_name)
+    return (mask_bytes, legend)
+
+
+def load_shaded_views(directory: Path) -> dict[str, bytes] | None:
+    """Read all four shaded views together, rejecting missing or incomplete PNGs."""
+    images: dict[str, bytes] = {}
+    try:
+        for name in ORTHOGONAL_VIEW_NAMES:
+            filename = f"{name}.png"
+            data = (directory / filename).read_bytes()
+            if not _has_complete_png_chunks(data):
+                return None
+            images[filename] = data
+    except OSError:
+        return None
+    return images
+
+
+def load_shaded_views_with_masks(directory: Path) -> ShadedViewsBundle | None:
+    """Read all four shaded views and best-effort attach any semantic masks and legend."""
+    images = load_shaded_views(directory)
+    if images is None:
+        return None
+    masks: dict[str, bytes] = {}
+    for name in ORTHOGONAL_VIEW_NAMES:
+        mask_data = load_semantic_mask(directory, name)
+        if mask_data is not None:
+            masks[name] = mask_data
+    legend = load_semantic_legend(directory)
+    return ShadedViewsBundle(images, semantic_masks=masks, semantic_legend=legend)
 
 
 class CompilerBridgeError(RuntimeError):
@@ -57,17 +284,34 @@ def discover_cad_cli(
 
     root = (workspace_root or find_workspace_root()).resolve()
     exe_names = ("cad-cli.exe", "cad-cli") if os.name == "nt" else ("cad-cli", "cad-cli.exe")
-    built_candidates: list[Path] = []
-    for profile in ("release", "debug"):
-        for name in exe_names:
-            candidate = root / "target" / profile / name
-            if candidate.is_file():
-                built_candidates.append(candidate.resolve())
-                break
+    search_roots = [root]
+    git_entry = root / ".git"
+    if git_entry.is_file():
+        try:
+            git_text = git_entry.read_text(encoding="utf-8", errors="ignore").strip()
+            if git_text.lower().startswith("gitdir:"):
+                gitdir = Path(git_text.split(":", 1)[1].strip())
+                if not gitdir.is_absolute():
+                    gitdir = (root / gitdir).resolve()
+                # Worktree gitdir is <main_repo>/.git/worktrees/<worktree_name>
+                if gitdir.parent.name == "worktrees" and gitdir.parent.parent.name == ".git":
+                    main_repo = gitdir.parent.parent.parent.resolve()
+                    if main_repo not in search_roots:
+                        search_roots.append(main_repo)
+        except OSError:
+            pass
 
-    if built_candidates:
-        built_candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-        return built_candidates[0]
+    for candidate_root in search_roots:
+        built_candidates: list[Path] = []
+        for profile in ("release", "debug"):
+            for name in exe_names:
+                candidate = candidate_root / "target" / profile / name
+                if candidate.is_file():
+                    built_candidates.append(candidate.resolve())
+                    break
+        if built_candidates:
+            built_candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            return built_candidates[0]
 
     which_path = shutil.which("cad-cli")
     if which_path:
@@ -247,27 +491,193 @@ def _point_inside_closed_mesh(point: Vec3, triangles: list[tuple[Vec3, Vec3, Vec
     return (hits % 2) == 1
 
 
-def _point_in_zone(point: Vec3, zone: KeepOutZone, tolerance: float) -> bool:
-    bbox = zone.resolved_bbox_mm().shrunk(tolerance)
-    px, py, pz = point
-    if not (bbox.min[0] <= px <= bbox.max[0] and bbox.min[1] <= py <= bbox.max[1] and bbox.min[2] <= pz <= bbox.max[2]):
+def _point_segment_distance_sq(point: Vec3, start: Vec3, end: Vec3) -> float:
+    """Return the squared distance from a point to a finite 3D segment."""
+    edge = _sub(end, start)
+    length_sq = _dot(edge, edge)
+    if length_sq == 0.0:
+        delta = _sub(point, start)
+        return _dot(delta, delta)
+    t = _dot(_sub(point, start), edge) / length_sq
+    t = max(0.0, min(1.0, t))
+    closest = (
+        start[0] + edge[0] * t,
+        start[1] + edge[1] * t,
+        start[2] + edge[2] * t,
+    )
+    delta = _sub(point, closest)
+    return _dot(delta, delta)
+
+
+def _point_triangle_distance_sq(point: Vec3, v0: Vec3, v1: Vec3, v2: Vec3) -> float:
+    """Closest point distance for a 3D triangle using Ericson's region tests."""
+    edge01 = _sub(v1, v0)
+    edge02 = _sub(v2, v0)
+    normal = _cross(edge01, edge02)
+    if _dot(normal, normal) == 0.0:
+        return min(
+            _point_segment_distance_sq(point, v0, v1),
+            _point_segment_distance_sq(point, v1, v2),
+            _point_segment_distance_sq(point, v2, v0),
+        )
+
+    to_point = _sub(point, v0)
+    d1 = _dot(edge01, to_point)
+    d2 = _dot(edge02, to_point)
+    if d1 <= 0.0 and d2 <= 0.0:
+        delta = _sub(point, v0)
+        return _dot(delta, delta)
+
+    to_v1 = _sub(point, v1)
+    d3 = _dot(edge01, to_v1)
+    d4 = _dot(edge02, to_v1)
+    if d3 >= 0.0 and d4 <= d3:
+        delta = _sub(point, v1)
+        return _dot(delta, delta)
+
+    vc = d1 * d4 - d3 * d2
+    if vc <= 0.0 and d1 >= 0.0 and d3 <= 0.0:
+        t = d1 / (d1 - d3)
+        closest = (v0[0] + edge01[0] * t, v0[1] + edge01[1] * t, v0[2] + edge01[2] * t)
+        delta = _sub(point, closest)
+        return _dot(delta, delta)
+
+    to_v2 = _sub(point, v2)
+    d5 = _dot(edge01, to_v2)
+    d6 = _dot(edge02, to_v2)
+    if d6 >= 0.0 and d5 <= d6:
+        delta = _sub(point, v2)
+        return _dot(delta, delta)
+
+    vb = d5 * d2 - d1 * d6
+    if vb <= 0.0 and d2 >= 0.0 and d6 <= 0.0:
+        t = d2 / (d2 - d6)
+        closest = (v0[0] + edge02[0] * t, v0[1] + edge02[1] * t, v0[2] + edge02[2] * t)
+        delta = _sub(point, closest)
+        return _dot(delta, delta)
+
+    va = d3 * d6 - d5 * d4
+    if va <= 0.0 and (d4 - d3) >= 0.0 and (d5 - d6) >= 0.0:
+        edge12 = _sub(v2, v1)
+        t = (d4 - d3) / ((d4 - d3) + (d5 - d6))
+        closest = (v1[0] + edge12[0] * t, v1[1] + edge12[1] * t, v1[2] + edge12[2] * t)
+        delta = _sub(point, closest)
+        return _dot(delta, delta)
+
+    barycentric_sum = va + vb + vc
+    if barycentric_sum == 0.0:
+        return min(
+            _point_segment_distance_sq(point, v0, v1),
+            _point_segment_distance_sq(point, v1, v2),
+            _point_segment_distance_sq(point, v2, v0),
+        )
+    denominator = 1.0 / barycentric_sum
+    v = vb * denominator
+    w = vc * denominator
+    closest = (
+        v0[0] + edge01[0] * v + edge02[0] * w,
+        v0[1] + edge01[1] * v + edge02[1] * w,
+        v0[2] + edge01[2] * v + edge02[2] * w,
+    )
+    delta = _sub(point, closest)
+    return _dot(delta, delta)
+
+
+def _cylinder_local_point(point: Vec3, origin: Vec3, axis: str) -> Vec3:
+    """Map a world point to the cylinder's local (u, v, axial) frame."""
+    dx, dy, dz = _sub(point, origin)
+    direction = -1.0 if axis.startswith("-") else 1.0
+    cardinal = axis.upper().lstrip("+-")
+    if cardinal.startswith("X"):
+        return (dy, dz, direction * dx)
+    if cardinal.startswith("Y"):
+        return (dx, dz, direction * dy)
+    return (dx, dy, direction * dz)
+
+
+def _clip_polygon_axis(
+    polygon: list[Vec3], value: float, *, keep_above: bool,
+) -> list[Vec3]:
+    """Clip a 3D polygon against one axial half-space."""
+    if not polygon:
+        return []
+    result: list[Vec3] = []
+    previous = polygon[-1]
+    previous_inside = previous[2] >= value if keep_above else previous[2] <= value
+    for current in polygon:
+        current_inside = current[2] >= value if keep_above else current[2] <= value
+        if current_inside != previous_inside:
+            t = (value - previous[2]) / (current[2] - previous[2])
+            result.append(
+                (
+                    previous[0] + (current[0] - previous[0]) * t,
+                    previous[1] + (current[1] - previous[1]) * t,
+                    value,
+                )
+            )
+        if current_inside:
+            result.append(current)
+        previous = current
+        previous_inside = current_inside
+    return result
+
+
+def _origin_inside_convex_polygon(polygon: list[Vec3]) -> bool:
+    """Check origin containment in a convex polygon, including collinear edges."""
+    signs: list[bool] = []
+    for index, current in enumerate(polygon):
+        previous = polygon[index - 1]
+        cross_z = previous[0] * current[1] - previous[1] * current[0]
+        if cross_z != 0.0:
+            signs.append(cross_z > 0.0)
+    return bool(signs) and all(sign == signs[0] for sign in signs)
+
+
+def _triangle_intersects_sphere(
+    v0: Vec3,
+    v1: Vec3,
+    v2: Vec3,
+    *,
+    center: Vec3,
+    radius_sq: float,
+) -> bool:
+    return _point_triangle_distance_sq(center, v0, v1, v2) < radius_sq
+
+
+def _triangle_intersects_cylinder(
+    v0: Vec3,
+    v1: Vec3,
+    v2: Vec3,
+    *,
+    origin: Vec3,
+    axis: str,
+    radius_sq: float,
+    height: float,
+) -> bool:
+    local = [_cylinder_local_point(vertex, origin, axis) for vertex in (v0, v1, v2)]
+    axial_values = [point[2] for point in local]
+    if max(axial_values) <= 0.0 or min(axial_values) >= height:
         return False
+    # With open-slab overlap and a strictly interior radial distance, a
+    # closest point on a cap also implies an intersection just inside the cap.
+    clipped = _clip_polygon_axis(local, 0.0, keep_above=True)
+    clipped = _clip_polygon_axis(clipped, height, keep_above=False)
+    if not clipped:
+        return False
+    projected = [(u, v, 0.0) for u, v, _ in clipped]
+    if _origin_inside_convex_polygon(projected):
+        return True
+    distance_sq = min(
+        _point_segment_distance_sq((0.0, 0.0, 0.0), projected[index - 1], point)
+        for index, point in enumerate(projected)
+    )
+    return distance_sq < radius_sq
+
+
+def _keep_out_cylinder_height(zone: KeepOutZone) -> float | None:
     if zone.kind == "cylinder" and zone.origin_mm is not None and zone.diameter_mm is not None:
-        r = max(0.0, zone.diameter_mm * 0.5 - tolerance)
-        ox, oy, oz = zone.origin_mm
-        ax = zone.axis.upper().lstrip("+-")
-        if ax.startswith("X"):
-            dist2 = (py - oy) ** 2 + (pz - oz) ** 2
-        elif ax.startswith("Y"):
-            dist2 = (px - ox) ** 2 + (pz - oz) ** 2
-        else:
-            dist2 = (px - ox) ** 2 + (py - oy) ** 2
-        return dist2 <= r * r
-    if zone.kind == "sphere" and zone.origin_mm is not None and zone.diameter_mm is not None:
-        r = max(0.0, zone.diameter_mm * 0.5 - tolerance)
-        ox, oy, oz = zone.origin_mm
-        return ((px - ox) ** 2 + (py - oy) ** 2 + (pz - oz) ** 2) <= r * r
-    return True
+        return zone.height_mm
+    return None
 
 
 def _mesh_intersects_keep_out_zone(
@@ -275,32 +685,40 @@ def _mesh_intersects_keep_out_zone(
     zone: KeepOutZone,
     tolerance: float,
 ) -> bool:
-    shrunk = zone.resolved_bbox_mm().shrunk(tolerance)
-    bmin: Vec3 = (shrunk.min[0], shrunk.min[1], shrunk.min[2])
-    bmax: Vec3 = (shrunk.max[0], shrunk.max[1], shrunk.max[2])
+    zone_bbox = zone.resolved_bbox_mm()
+    origin = zone.origin_mm
+    diameter = zone.diameter_mm
+    height = _keep_out_cylinder_height(zone)
+    intersects: Callable[[Vec3, Vec3, Vec3], bool] | None = None
+    if origin is not None and diameter is not None and (zone.kind == "sphere" or height is not None):
+        radius = diameter * 0.5 - tolerance
+        if radius <= 0.0 or (height is not None and height <= 0.0):
+            return False
+        center = (float(origin[0]), float(origin[1]), float(origin[2]))
+        radius_sq = radius * radius
+        if height is None:
+            intersects = partial(_triangle_intersects_sphere, center=center, radius_sq=radius_sq)
+        else:
+            intersects = partial(
+                _triangle_intersects_cylinder,
+                origin=center,
+                axis=zone.axis,
+                radius_sq=radius_sq,
+                height=height,
+            )
+    else:
+        # Box zones and legacy zones specified only by bounds use the inset box.
+        zone_bbox = zone_bbox.shrunk(tolerance)
 
+    bmin = (zone_bbox.min[0], zone_bbox.min[1], zone_bbox.min[2])
+    bmax = (zone_bbox.max[0], zone_bbox.max[1], zone_bbox.max[2])
     for v0, v1, v2 in triangles:
-        if not _triangle_intersects_aabb(v0, v1, v2, bmin, bmax):
-            continue
-        if zone.kind == "box":
-            return True
-        # For cylinder/sphere, verify triangle vertices or centroid lie inside exact analytic shape
-        centroid = (
-            (v0[0] + v1[0] + v2[0]) / 3.0,
-            (v0[1] + v1[1] + v2[1]) / 3.0,
-            (v0[2] + v1[2] + v2[2]) / 3.0,
-        )
-        if any(_point_in_zone(p, zone, tolerance) for p in (v0, v1, v2, centroid)):
-            return True
-        # Also sample edge midpoints for large triangles spanning across a cylinder
-        m01 = ((v0[0] + v1[0]) * 0.5, (v0[1] + v1[1]) * 0.5, (v0[2] + v1[2]) * 0.5)
-        m12 = ((v1[0] + v2[0]) * 0.5, (v1[1] + v2[1]) * 0.5, (v1[2] + v2[2]) * 0.5)
-        m20 = ((v2[0] + v0[0]) * 0.5, (v2[1] + v0[1]) * 0.5, (v2[2] + v0[2]) * 0.5)
-        if any(_point_in_zone(p, zone, tolerance) for p in (m01, m12, m20)):
-            return True
+        if _triangle_intersects_aabb(v0, v1, v2, bmin, bmax):
+            if intersects is None or intersects(v0, v1, v2):
+                return True
 
-    # Catch cases where the Keep-Out zone is completely enclosed inside solid material
-    return _point_inside_closed_mesh(shrunk.center, triangles)
+    # Catch cases where the Keep-Out zone is completely enclosed inside solid material.
+    return _point_inside_closed_mesh(zone_bbox.center, triangles)
 
 
 def check_keep_out_zones(
@@ -336,7 +754,10 @@ def check_keep_out_zones(
     for zone in keep_out_zones:
         zone_bbox = zone.resolved_bbox_mm()
         # Broad-phase AABB screening
-        if not metrics.bbox_mm.intersects(zone_bbox, tolerance=tolerance):
+        # An exact cylinder uses tolerance only in the radial direction.
+        exact_cylinder = triangles is not None and _keep_out_cylinder_height(zone) is not None
+        broadphase_tolerance = 0.0 if exact_cylinder else tolerance
+        if not metrics.bbox_mm.intersects(zone_bbox, tolerance=broadphase_tolerance):
             continue
         # Narrow-phase exact mesh interference check when mesh triangles are available
         if triangles is not None:
@@ -353,6 +774,41 @@ def check_keep_out_zones(
     return (len(violations) == 0, violations)
 
 
+def check_external_envelope(
+    metrics: CompileMetrics | None,
+    bbox: BBox3D,
+    mesh_data: dict[str, Any] | None,
+    tolerance: float,
+) -> tuple[bool, str]:
+    """Phase A containment screen, not exact interference or minimum clearance."""
+    if metrics is None:
+        return False, "External envelope could not be checked: missing compiled bounds"
+    if not metrics.bbox_mm.contains(bbox, tolerance=tolerance)[0]:
+        return True, "External envelope not fully enclosed (partial overlaps are not checked)"
+    if not mesh_data or not mesh_data.get("faces"):
+        return False, "Generated bounds enclose the external AABB; missing mesh evidence of clearance"
+
+    if min(bbox.dimensions) <= tolerance * 2:
+        return False, "Generated bounds enclose a degenerate external AABB; clearance cannot be verified"
+    envelope = KeepOutZone(zone_id="external_asset", bbox_mm=bbox)
+    try:
+        # Separate components so overlapping solid shells cannot cancel each other's inside parity.
+        faces_by_component: dict[str | None, list[dict[str, Any]]] = {}
+        for face in mesh_data["faces"]:
+            if not isinstance(face, dict):
+                raise ValueError("invalid face")
+            faces_by_component.setdefault(face.get("component_id"), []).append(face)
+        for faces in faces_by_component.values():
+            triangles = _extract_mesh_triangles({"faces": faces})
+            if not triangles:
+                return False, "Generated bounds enclose the external AABB; missing mesh evidence of clearance"
+            if _mesh_intersects_keep_out_zone(triangles, envelope, tolerance):
+                return False, "Generated bounds enclose the external AABB and the compiled mesh occupies it"
+    except (IndexError, TypeError, ValueError):
+        return False, "Generated bounds enclose the external AABB; invalid clearance mesh"
+    return True, "Compiled mesh shows no occupancy inside the enclosed external AABB (Phase A approximation)"
+
+
 SubprocessRunner = Callable[..., subprocess.CompletedProcess[str]]
 
 
@@ -367,9 +823,11 @@ class CompilerBridge:
         timeout_sec: float = 30.0,
         runner: SubprocessRunner | None = None,
     ) -> None:
-        self.workspace_root = (
-            Path(workspace_root).resolve() if workspace_root is not None else find_workspace_root()
-        )
+        self.repo_root = find_workspace_root()
+        self._asset_root = Path(workspace_root).resolve() if workspace_root is not None else None
+        if self._asset_root is not None and not self._asset_root.is_dir():
+            raise CompilerBridgeError("--workspace-root must be an existing directory")
+        self.workspace_root = self._asset_root or self.repo_root
         self._explicit_bin = (
             Path(cli_bin).resolve()
             if cli_bin is not None and (os.sep in str(cli_bin) or "/" in str(cli_bin) or Path(cli_bin).exists())
@@ -379,7 +837,7 @@ class CompilerBridge:
         self._runner = runner or subprocess.run
 
     def resolve_binary(self) -> Path:
-        resolved = discover_cad_cli(self._explicit_bin, self.workspace_root)
+        resolved = discover_cad_cli(self._explicit_bin, self.repo_root)
         if resolved is None:
             raise CompilerBridgeError(
                 "Could not locate `cad-cli`. Build it with `cargo build -p cad-cli` "
@@ -387,11 +845,63 @@ class CompilerBridge:
             )
         return resolved
 
+    def _workspace_args(self) -> list[str]:
+        return ["--workspace-root", str(self._asset_root)] if self._asset_root is not None else []
+
+    def inspect_external_asset(
+        self, asset_path: str | Path, *, source_unit: str | None = None,
+    ) -> ExternalInterfaceSummary:
+        """Inspect a file under an explicit trusted root; never use the caller's CWD as that root."""
+        if self._asset_root is None:
+            raise CompilerBridgeError("External inspection requires an explicit --workspace-root")
+        if source_unit is not None and source_unit not in EXTERNAL_LENGTH_UNITS:
+            raise CompilerBridgeError("Unsupported external asset source unit")
+        relative_or_abs = Path(asset_path)
+        if ".." in relative_or_abs.parts or (relative_or_abs.anchor and not relative_or_abs.is_absolute()):
+            raise CompilerBridgeError("Context asset must stay within --workspace-root")
+        try:
+            path = (self._asset_root / relative_or_abs).resolve(strict=True)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise CompilerBridgeError("Cannot resolve context asset within --workspace-root") from exc
+        if not path.is_relative_to(self._asset_root):
+            raise CompilerBridgeError("Context asset must stay within --workspace-root")
+        if not path.is_file():
+            raise CompilerBridgeError("Context asset must be a file")
+        # The CLI resolves again against the explicit root while opening the asset.
+        relative_path = path.relative_to(self._asset_root).as_posix()
+        cmd = [str(self.resolve_binary()), "inspect", "--json", *self._workspace_args()]
+        if source_unit is not None:
+            cmd.extend(["--source-unit", source_unit])
+        cmd.extend(["--", relative_path])
+        payload, proc = self._run_json(cmd, subject=path)
+        if proc.returncode != 0 or payload.get("status") != "ok":
+            raise CompilerBridgeError(f"cad-cli inspect failed (exit={proc.returncode}); check the asset format, geometry and CLI features")
+        try:
+            summary = ExternalInterfaceSummary.from_cli_json(payload)
+        except ContractValidationError as exc:
+            raise CompilerBridgeError(str(exc)) from exc
+        if payload["format"] in ("STEP", "BREP", "IGES"):
+            summary.exact_asset_path = relative_path
+            summary.exact_asset_sha256 = payload["sha256"]
+        return summary
+
+    def check_external_interference(
+        self, kcl_file: Path, context: ExternalInterfaceSummary,
+    ) -> CompileResult:
+        if self._asset_root is None or context.exact_asset_path is None or context.exact_asset_sha256 is None:
+            raise CompilerBridgeError("Exact interference requires an inspected asset and a workspace root")
+        kcl_path = kcl_file.resolve()
+        cmd = [
+            str(self.resolve_binary()), "check", str(kcl_path), "--json", *self._workspace_args(),
+            "--against-asset", context.exact_asset_path, "--against-sha256", context.exact_asset_sha256,
+        ]
+        return self._invoke_json(cmd, kcl_path=kcl_path)
+
     def check(self, kcl_file: str | Path) -> CompileResult:
         """Execute `cad-cli check <file> --json` and parse diagnostics + metrics."""
         kcl_path = Path(kcl_file).resolve()
         cli_path = self.resolve_binary()
-        cmd = [str(cli_path), "check", str(kcl_path), "--json"]
+        cmd = [str(cli_path), "check", str(kcl_path), "--json", *self._workspace_args()]
         return self._invoke_json(cmd, kcl_path=kcl_path)
 
     def build(
@@ -433,7 +943,7 @@ class CompilerBridge:
             cmd.extend(["--out-drawing", drawing_str])
         if component:
             cmd.extend(["--component", component])
-        cmd.append("--json")
+        cmd.extend(["--json", *self._workspace_args()])
 
         return self._invoke_json(
             cmd,
@@ -444,6 +954,67 @@ class CompilerBridge:
             dxf_path=dxf_str,
             drawing_path=drawing_str,
         )
+
+    def render_shaded_views(
+        self,
+        kcl_file: str | Path,
+        *,
+        emit_semantic_mask: bool = True,
+    ) -> dict[str, bytes] | None:
+        """Try a separate, disposable wgpu build (with semantic masks) for multimodal review."""
+        try:
+            kcl_path = Path(kcl_file).resolve()
+            binary = str(self.resolve_binary())
+            workspace_args = self._workspace_args()
+            with tempfile.TemporaryDirectory(prefix="cad_agent_render_") as render_dir:
+                cmd = [
+                    binary, "build", str(kcl_path),
+                    "--out-render", render_dir,
+                    *(["--emit-semantic-mask"] if emit_semantic_mask else []),
+                    "--json",
+                    *workspace_args,
+                ]
+                try:
+                    payload, proc = self._run_json(cmd, subject=kcl_path)
+                except CompilerBridgeError as exc:
+                    msg = str(exc).lower()
+                    if emit_semantic_mask and "semantic" in msg and "--out-render" not in msg:
+                        return self._render_shaded_views_without_mask(
+                            binary, kcl_path, workspace_args,
+                        )
+                    return None
+                if proc.returncode != 0 or payload.get("status") != "ok":
+                    diag_blob = (
+                        json.dumps(payload, ensure_ascii=False).lower()
+                        + " "
+                        + (proc.stderr or "").lower()
+                    )
+                    if emit_semantic_mask and "semantic" in diag_blob and "--out-render" not in diag_blob:
+                        return self._render_shaded_views_without_mask(
+                            binary, kcl_path, workspace_args,
+                        )
+                    return None
+                return load_shaded_views_with_masks(Path(render_dir))
+        except (CompilerBridgeError, OSError):
+            return None
+
+    def _render_shaded_views_without_mask(
+        self,
+        binary: str,
+        kcl_path: Path,
+        workspace_args: list[str],
+    ) -> dict[str, bytes] | None:
+        with tempfile.TemporaryDirectory(prefix="cad_agent_render_nomask_") as fallback_dir:
+            cmd = [
+                binary, "build", str(kcl_path),
+                "--out-render", fallback_dir,
+                "--json",
+                *workspace_args,
+            ]
+            payload, proc = self._run_json(cmd, subject=kcl_path)
+            if proc.returncode != 0 or payload.get("status") != "ok":
+                return None
+            return load_shaded_views_with_masks(Path(fallback_dir))
 
     def _invoke_json(
         self,
@@ -456,21 +1027,40 @@ class CompilerBridge:
         dxf_path: str | None = None,
         drawing_path: str | None = None,
     ) -> CompileResult:
+        payload, proc = self._run_json(cmd, subject=kcl_path)
+        return CompileResult.from_cli_json(
+            payload,
+            step_path=step_path,
+            mesh_path=mesh_path,
+            views_dir=views_dir,
+            dxf_path=dxf_path,
+            drawing_path=drawing_path,
+            exit_code=proc.returncode,
+            raw_stderr=(proc.stderr or "").strip(),
+        )
+
+    def _run_json(
+        self, cmd: Sequence[str], *, subject: Path,
+    ) -> tuple[dict[str, Any], subprocess.CompletedProcess[str]]:
         try:
             proc = self._runner(
                 list(cmd),
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
                 timeout=self.timeout_sec,
                 check=False,
-                cwd=str(self.workspace_root),
+                cwd=str(self.repo_root),
+                env=observe.subprocess_env(),
             )
         except OSError as exc:
             raise CompilerBridgeError(f"Failed to launch cad-cli ({cmd[0]}): {exc}") from exc
         except subprocess.TimeoutExpired as exc:
             raise CompilerBridgeError(
-                f"cad-cli timed out after {self.timeout_sec}s on {kcl_path}"
+                f"cad-cli timed out after {self.timeout_sec}s on {subject}"
             ) from exc
+        except UnicodeError as exc:
+            raise CompilerBridgeError("cad-cli output was not valid UTF-8") from exc
 
         stdout = (proc.stdout or "").strip()
         stderr = (proc.stderr or "").strip()
@@ -491,13 +1081,4 @@ class CompilerBridge:
         if not isinstance(payload, dict) or "status" not in payload:
             raise CompilerBridgeError(f"Unexpected cad-cli JSON shape: {payload!r}")
 
-        return CompileResult.from_cli_json(
-            payload,
-            step_path=step_path,
-            mesh_path=mesh_path,
-            views_dir=views_dir,
-            dxf_path=dxf_path,
-            drawing_path=drawing_path,
-            exit_code=proc.returncode,
-            raw_stderr=stderr,
-        )
+        return payload, proc

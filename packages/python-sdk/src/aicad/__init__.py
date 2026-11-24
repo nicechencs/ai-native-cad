@@ -1,0 +1,112 @@
+"""Grounded generative SDK for AI-Native CAD graphs and ``.aicad`` projects."""
+
+from aicad._schema_constants import (
+    CLI_EXIT_CODES,
+    CONTAINER_FORMAT_VERSION,
+    DIAGNOSTIC_CODES,
+    IR_SCHEMA_VERSION,
+    RUNTIME_CODES,
+    VERIFICATION_REPORT_SCHEMA_VERSION,
+)
+from aicad.container import (
+    DEFAULT_KERNEL_FINGERPRINT,
+    inspect_aicad_container_metadata,
+    save_aicad_directory,
+    save_aicad_sharded_directory,
+)
+from aicad.curves import (
+    decode_spline_blob,
+    encode_spline_blob,
+    generate_helix_3d,
+    generate_involute_gear_tooth,
+    generate_naca4_airfoil,
+    sha256_hex,
+)
+from aicad.graph import (
+    GraphBuilder,
+    ir_blob_ref,
+    ir_external_ref,
+    ir_list,
+    ir_node_ref,
+    ir_quantity,
+)
+from aicad.semantic import (
+    EngineeringDocument,
+    SemanticModelBuilder,
+    circle_entity,
+    line_entity,
+    polyline_entities,
+    profile_loop,
+    rectangle_entity,
+    spline_blob_entity,
+)
+from aicad.session import (
+    DEFAULT_CLI_TIMEOUT,
+    AicadProject,
+    CliError,
+    EngineeringSession,
+    RuntimeClient,
+    RuntimeSession,
+    UnsupportedSemanticTransport,
+    export_cadpack,
+    find_cad_cli,
+)
+from aicad.subd import SubDCage, decode_subd_blob, encode_subd_blob
+from aicad.units import Quantity, deg, g, inch, kg, meter, mm, mpa, newton, rad
+
+__version__ = "0.1.0"
+
+__all__ = [
+    "AicadProject",
+    "CLI_EXIT_CODES",
+    "CONTAINER_FORMAT_VERSION",
+    "CliError",
+    "DEFAULT_CLI_TIMEOUT",
+    "DEFAULT_KERNEL_FINGERPRINT",
+    "DIAGNOSTIC_CODES",
+    "EngineeringDocument",
+    "EngineeringSession",
+    "GraphBuilder",
+    "IR_SCHEMA_VERSION",
+    "Quantity",
+    "RUNTIME_CODES",
+    "RuntimeClient",
+    "RuntimeSession",
+    "SemanticModelBuilder",
+    "SubDCage",
+    "UnsupportedSemanticTransport",
+    "VERIFICATION_REPORT_SCHEMA_VERSION",
+    "circle_entity",
+    "decode_spline_blob",
+    "decode_subd_blob",
+    "deg",
+    "encode_spline_blob",
+    "encode_subd_blob",
+    "export_cadpack",
+    "find_cad_cli",
+    "g",
+    "generate_helix_3d",
+    "generate_involute_gear_tooth",
+    "generate_naca4_airfoil",
+    "inch",
+    "inspect_aicad_container_metadata",
+    "ir_blob_ref",
+    "ir_external_ref",
+    "ir_list",
+    "ir_node_ref",
+    "ir_quantity",
+    "kg",
+    "line_entity",
+    "meter",
+    "mm",
+    "mpa",
+    "newton",
+    "polyline_entities",
+    "profile_loop",
+    "rad",
+    "rectangle_entity",
+    "save_aicad_directory",
+    "save_aicad_sharded_directory",
+    "sha256_hex",
+    "spline_blob_entity",
+]

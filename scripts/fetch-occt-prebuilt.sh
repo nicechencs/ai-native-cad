@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Idempotently fetch prebuilt OpenCASCADE (OCCT 7.8+) dynamic libraries for macOS / Linux
+# Idempotently fetch prebuilt OpenCASCADE (OCCT 7.9+) dynamic libraries for macOS / Linux
 # from conda-forge into cpp/occt-prebuilt/, strictly enforcing LGPL-2.1 dynamic linking.
 
 set -euo pipefail
@@ -7,7 +7,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 TARGET_DIR="${REPO_ROOT}/cpp/occt-prebuilt"
-OCCT_VERSION="7.8"
+OCCT_VERSION="7.9"
 DRY_RUN=0
 FORCE=0
 
@@ -17,7 +17,7 @@ Usage: $(basename "$0") [OPTIONS]
 
 Options:
   --dry-run            Inspect environment and print planned command & CMake guidance
-  --version <ver>      Minimum OCCT version from conda-forge (default: 7.8)
+  --version <ver>      Minimum OCCT version from conda-forge (default: 7.9)
   --prefix <dir>       Target installation prefix (default: cpp/occt-prebuilt)
   --force              Remove existing target directory and reinstall
   -h, --help           Show this help message

@@ -79,6 +79,37 @@ export const KCL_KEYWORDS = [
   "in",
   "true",
   "false",
+  "ellipse",
+  "profile::ellipse",
+  "spline",
+  "profile::spline",
+  "path::helix",
+  "path::spline3d",
+] as const;
+
+export const KCL_BUILTIN_FUNCTIONS = [
+  "box",
+  "cylinder",
+  "extrude",
+  "extrude_symmetric",
+  "revolve",
+  "sweep",
+  "loft",
+  "shell",
+  "mirror",
+  "fillet",
+  "chamfer",
+  "point",
+  "line",
+  "arc",
+  "circle",
+  "rectangle",
+  "ellipse",
+  "profile::ellipse",
+  "spline",
+  "profile::spline",
+  "path::helix",
+  "path::spline3d",
 ] as const;
 
 export const KCL_TYPE_KEYWORDS = [
@@ -133,6 +164,9 @@ export const KCL_NAMESPACES = [
   "implicit",
   "field",
   "force",
+  "profile",
+  "path",
+  "import",
 ] as const;
 
 export const kclMonarchTokensProvider: KclMonarchLanguage = {
@@ -160,9 +194,9 @@ export const kclMonarchTokensProvider: KclMonarchLanguage = {
       [/\|>/, "operator.pipe"],
       [/->/, "operator.arrow"],
 
-      // Namespace calls: constraint::coincident, boolean::subtract, mate::coaxial, hole::tapped, etc.
+      // Namespace calls: constraint::coincident, boolean::subtract, mate::coaxial, hole::tapped, profile::ellipse, profile::spline, path::helix, path::spline3d, etc.
       [
-        /\b(?:constraint|boolean|region|array|hole|mate|tag|pmi|assert|implicit|field|force)::[a-zA-Z_][\w]*/,
+        /\b(?:constraint|boolean|region|array|hole|mate|tag|pmi|assert|implicit|field|force|profile|path)::[a-zA-Z_][\w]*/,
         "namespace.call",
       ],
       [/[a-zA-Z_][\w]*::[a-zA-Z_][\w]*/, "namespace.call"],

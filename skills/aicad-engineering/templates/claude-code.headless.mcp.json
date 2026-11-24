@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "aicad": {
+      "type": "stdio",
+      "command": "cad-cli",
+      "args": ["mcp", "--workspace", ".", "--project", "part.aicad"]
+    }
+  }
+}

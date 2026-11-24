@@ -1,0 +1,390 @@
+{
+  "$comment": "Single source of truth for cross-language schema versions, CLI exit codes, diagnostic codes, and runtime codes shared by Rust, TypeScript (studio-ui), and Python (aicad).",
+  "versions": {
+    "IR_SCHEMA_VERSION": 1,
+    "CONTAINER_FORMAT_VERSION": 1,
+    "VERIFICATION_REPORT_SCHEMA_VERSION": 1
+  },
+  "cli_exit_codes": [
+    {
+      "key": "OK",
+      "code": 0,
+      "status": "ok",
+      "description": "Command succeeded (or non-exact mesh preview inspection passed)."
+    },
+    {
+      "key": "ERROR",
+      "code": 1,
+      "status": "error",
+      "description": "Compilation, geometry, topology, verification, or exact B-Rep watertightness check failed."
+    },
+    {
+      "key": "IO_OR_USAGE_ERROR",
+      "code": 2,
+      "status": "error",
+      "description": "File I/O failure (E001_IO_ERROR), CLI argument/usage error, or project/host command error."
+    }
+  ],
+  "diagnostic_codes": [
+    {
+      "code": "E001_IO_ERROR",
+      "category": "io",
+      "layer": "L0",
+      "description": "Failed to read or access a source or asset file."
+    },
+    {
+      "code": "E002_SYNTAX_ERROR",
+      "category": "syntax",
+      "layer": "L0",
+      "description": "Lexical or syntactic parse error in KCL source."
+    },
+    {
+      "code": "E101_UNDEFINED_SYMBOL",
+      "category": "hir",
+      "layer": "L0",
+      "description": "Referenced identifier, function, or parameter is not defined."
+    },
+    {
+      "code": "E102_UNIT_MISMATCH",
+      "category": "hir",
+      "layer": "L0",
+      "description": "Physical dimension or unit mismatch in an expression or feature argument."
+    },
+    {
+      "code": "E103_INVALID_VALUE",
+      "category": "hir",
+      "layer": "L0",
+      "description": "Compile-time invalid literal or out-of-range numeric value."
+    },
+    {
+      "code": "E201_AMBIGUOUS_TOPOLOGY",
+      "category": "topology",
+      "layer": "L1",
+      "description": "Topological selector matched multiple entities without explicit disambiguation."
+    },
+    {
+      "code": "E202_EMPTY_SELECTOR",
+      "category": "topology",
+      "layer": "L1",
+      "description": "Topological selector matched zero entities."
+    },
+    {
+      "code": "E203_UNCLOSED_SKETCH",
+      "category": "sketch",
+      "layer": "L2",
+      "description": "Sketch profile is open where a closed loop is required."
+    },
+    {
+      "code": "E204_OPEN_SKETCH_REGION",
+      "category": "sketch",
+      "layer": "L2",
+      "description": "Sketch region has open boundary or self-intersection."
+    },
+    {
+      "code": "E204_OVERCONSTRAINED",
+      "category": "sketch",
+      "layer": "L2",
+      "description": "2D geometric constraint system is overconstrained or conflicting."
+    },
+    {
+      "code": "E205_INVALID_FILLET_CHAMFER",
+      "category": "feature",
+      "layer": "L1",
+      "description": "Fillet radius or chamfer distance is non-positive, oversized, or degenerate."
+    },
+    {
+      "code": "E206_INVALID_SHELL_THICKNESS",
+      "category": "feature",
+      "layer": "L1",
+      "description": "Shell thickness is invalid for the target solid."
+    },
+    {
+      "code": "E207_INVALID_FEATURE",
+      "category": "feature",
+      "layer": "L1",
+      "description": "Feature operation parameters or geometry kernel operation failed."
+    },
+    {
+      "code": "E208_INVALID_ASSEMBLY_MATE",
+      "category": "assembly",
+      "layer": "L2",
+      "description": "Assembly component placement violates a mate constraint."
+    },
+    {
+      "code": "E209_INVALID_THREAD_SPEC",
+      "category": "feature",
+      "layer": "L1",
+      "description": "Thread specification or tap drill parameter is invalid."
+    },
+    {
+      "code": "E301_NON_WATERTIGHT",
+      "category": "geometry_gate",
+      "layer": "L1",
+      "description": "Resulting B-Rep or mesh has open edges or fails manifold watertightness."
+    },
+    {
+      "code": "E302_ZERO_VOLUME",
+      "category": "geometry_gate",
+      "layer": "L1",
+      "description": "Resulting solid has zero or degenerate volume."
+    },
+    {
+      "code": "E303_BBOX_ASSERTION_FAILED",
+      "category": "assertion",
+      "layer": "L2",
+      "description": "Bounding-box assertion failed."
+    },
+    {
+      "code": "E304_DFM_INACCESSIBLE",
+      "category": "dfm",
+      "layer": "L3",
+      "description": "Manufacturability check detected inaccessible or non-machinable geometry."
+    },
+    {
+      "code": "E400_INVALID_ARGUMENT",
+      "category": "api",
+      "layer": "L0",
+      "description": "Caller supplied an invalid or missing argument."
+    },
+    {
+      "code": "E400_INVALID_COMMAND",
+      "category": "api",
+      "layer": "L0",
+      "description": "Semantic command payload or catalog operation was rejected."
+    },
+    {
+      "code": "E400_INVALID_CONTRACT",
+      "category": "agent",
+      "layer": "L0",
+      "description": "Agent output or contract payload failed schema validation."
+    },
+    {
+      "code": "E401_EXPORT_FAILED",
+      "category": "export",
+      "layer": "L4",
+      "description": "Artifact export (STEP, DXF, 3MF, SVG, mesh, or render) failed."
+    },
+    {
+      "code": "E402_GRAPH_EVAL_UNSUPPORTED",
+      "category": "evaluator",
+      "layer": "L0",
+      "description": "Strict GraphEvaluator mode rejected a source containing constructs that still require the legacy DSL evaluator."
+    },
+    {
+      "code": "E404_NODE_NOT_FOUND",
+      "category": "api",
+      "layer": "L2",
+      "description": "Referenced graph node or parameter id does not exist."
+    },
+    {
+      "code": "E409_PREVIEW_DIVERGED",
+      "category": "runtime",
+      "layer": "L2",
+      "description": "Main branch revision moved past preview base revision."
+    },
+    {
+      "code": "E409_REVISION_CONFLICT",
+      "category": "runtime",
+      "layer": "L2",
+      "description": "Optimistic concurrency revision check failed."
+    },
+    {
+      "code": "E410_NOT_WATERTIGHT",
+      "category": "inspect",
+      "layer": "L1",
+      "description": "Inspected exact B-Rep asset is not a watertight solid."
+    },
+    {
+      "code": "E422_VALIDATION_FAILED",
+      "category": "api",
+      "layer": "L2",
+      "description": "Command batch parsed but failed graph or domain validation rules."
+    },
+    {
+      "code": "E500_PERSIST_MISMATCH",
+      "category": "runtime",
+      "layer": "L0",
+      "description": "In-memory runtime session diverged from persisted SQLite head."
+    },
+    {
+      "code": "E501_ASSET_NOT_FOUND",
+      "category": "import",
+      "layer": "L2",
+      "description": "External asset path does not exist in workspace sandbox."
+    },
+    {
+      "code": "E502_UNSAFE_ASSET_PATH",
+      "category": "import",
+      "layer": "L2",
+      "description": "Asset path escaped workspace sandbox or used forbidden syntax/symlink."
+    },
+    {
+      "code": "E503_ASSET_HASH_MISMATCH",
+      "category": "import",
+      "layer": "L2",
+      "description": "External asset SHA-256 digest does not match declared sha256."
+    },
+    {
+      "code": "E504_UNSUPPORTED_IMPORT_FORMAT",
+      "category": "import",
+      "layer": "L4",
+      "description": "External asset format is unsupported or requires an unavailable kernel backend."
+    },
+    {
+      "code": "E505_IMPORT_NON_MANIFOLD_OR_OPEN",
+      "category": "import",
+      "layer": "L1",
+      "description": "Imported geometry has open boundaries or non-manifold edges/vertices."
+    },
+    {
+      "code": "E506_INTERFERENCE_DETECTED",
+      "category": "interference",
+      "layer": "L2",
+      "description": "Solids overlap or violate minimum clearance threshold."
+    },
+    {
+      "code": "E507_UNSUPPORTED_MIXED_BOOLEAN",
+      "category": "boolean",
+      "layer": "L1",
+      "description": "Unsupported boolean combination across discrete mesh and exact B-Rep representations."
+    },
+    {
+      "code": "E_BRANCH_EXISTS",
+      "category": "runtime",
+      "layer": "L2",
+      "description": "A preview or document branch with the requested name already exists."
+    },
+    {
+      "code": "E_CANCELLED",
+      "category": "runtime",
+      "layer": "L0",
+      "description": "Operation was cancelled before commit."
+    },
+    {
+      "code": "E_CONTAINER",
+      "category": "runtime",
+      "layer": "L0",
+      "description": "SQLite container read or write operation failed."
+    },
+    {
+      "code": "E_DISCOVERY",
+      "category": "runtime",
+      "layer": "L0",
+      "description": "Runtime discovery file could not be written or parsed."
+    },
+    {
+      "code": "E_EVAL",
+      "category": "evaluator",
+      "layer": "L1",
+      "description": "Graph evaluation failed before a durable result was recorded."
+    },
+    {
+      "code": "E_EXPERIMENTAL_OPERATOR",
+      "category": "gateway",
+      "layer": "L4",
+      "description": "Requested operator is experimental and cannot be delivered as exact B-Rep."
+    },
+    {
+      "code": "E_FEATURE_DISABLED",
+      "category": "evaluator",
+      "layer": "L0",
+      "description": "Requested feature requires a compile-time Cargo feature that is disabled."
+    },
+    {
+      "code": "E_FILLET_DEGENERATE",
+      "category": "feature",
+      "layer": "L1",
+      "description": "Fillet, chamfer, shell, or boolean operation produced degenerate geometry."
+    },
+    {
+      "code": "E_IO",
+      "category": "io",
+      "layer": "L0",
+      "description": "Filesystem I/O error outside the path sandbox."
+    },
+    {
+      "code": "E_JSONRPC_PARSE",
+      "category": "gateway",
+      "layer": "L0",
+      "description": "Malformed JSON-RPC request payload received by the MCP gateway."
+    },
+    {
+      "code": "E_KCL",
+      "category": "syntax",
+      "layer": "L0",
+      "description": "KCL source could not be parsed or projected to the canonical graph."
+    },
+    {
+      "code": "E_NOTHING_TO_REDO",
+      "category": "runtime",
+      "layer": "L2",
+      "description": "Redo stack is empty for the active branch."
+    },
+    {
+      "code": "E_NOTHING_TO_UNDO",
+      "category": "runtime",
+      "layer": "L2",
+      "description": "Active branch has no oplog entry available to undo."
+    },
+    {
+      "code": "E_PATH_ESCAPE",
+      "category": "runtime",
+      "layer": "L0",
+      "description": "Requested path escapes workspace_root or contains a forbidden parent traversal segment."
+    },
+    {
+      "code": "E_PROTECTED_BRANCH",
+      "category": "runtime",
+      "layer": "L2",
+      "description": "Protected branch (such as main or the active branch) cannot be deleted or overwritten."
+    },
+    {
+      "code": "E_RUNTIME",
+      "category": "runtime",
+      "layer": "L0",
+      "description": "Unspecified runtime session or host failure."
+    },
+    {
+      "code": "E_UNKNOWN",
+      "category": "cli",
+      "layer": "L0",
+      "description": "Unclassified CLI error."
+    },
+    {
+      "code": "E_UNKNOWN_BRANCH",
+      "category": "runtime",
+      "layer": "L2",
+      "description": "Referenced branch name does not exist in the container."
+    }
+  ],
+  "runtime_codes": [
+    {
+      "code": "R010_GPU_FALLBACK",
+      "description": "GPU compute/render path fell back to CPU implementation."
+    },
+    {
+      "code": "R011_IPC_FAILED",
+      "description": "Inter-process communication with daemon or desktop bridge failed."
+    },
+    {
+      "code": "R012_KERNEL_NATIVE",
+      "description": "Native OCCT geometry kernel fault or availability status."
+    },
+    {
+      "code": "R013_EMPTY_ISOSURFACE",
+      "description": "Implicit field evaluation produced an empty isosurface."
+    },
+    {
+      "code": "R014_VLM_DEGRADED",
+      "description": "Visual critic / VLM evaluation degraded or unavailable."
+    },
+    {
+      "code": "R015_DAEMON_RECONNECT",
+      "description": "Client reconnected to persistent CAD daemon."
+    },
+    {
+      "code": "R016_IO_ERROR",
+      "description": "Runtime process I/O error."
+    }
+  ]
+}

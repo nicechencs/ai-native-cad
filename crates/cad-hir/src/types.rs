@@ -117,6 +117,93 @@ impl DimType {
     }
 }
 
+/// Import parameter metadata shared by the checker and editor tooling.
+#[derive(Debug)]
+pub struct ImportParameter {
+    pub name: &'static str,
+    pub ty: DimType,
+    pub required: bool,
+    pub documentation: &'static str,
+}
+
+pub fn import_parameters(callee: &str) -> Option<&'static [ImportParameter]> {
+    const PATH: ImportParameter = ImportParameter {
+        name: "path",
+        ty: DimType::Str,
+        required: true,
+        documentation: "Asset path relative to the workspace root.",
+    };
+    const SHA256: ImportParameter = ImportParameter {
+        name: "sha256",
+        ty: DimType::Str,
+        required: false,
+        documentation: "Expected SHA-256 hex digest of the asset bytes.",
+    };
+    const OPEN_SHELL: ImportParameter = ImportParameter {
+        name: "allow_open_shell",
+        ty: DimType::Bool,
+        required: false,
+        documentation: "Allows open shells for preview, not for booleans. Defaults to false.",
+    };
+    const STEP: &[ImportParameter] = &[
+        PATH,
+        SHA256,
+        ImportParameter {
+            name: "deflection",
+            ty: DimType::Length,
+            required: false,
+            documentation: "Chordal deflection for viewport tessellation. Defaults to 0.05mm.",
+        },
+        ImportParameter {
+            name: "component",
+            ty: DimType::Str,
+            required: false,
+            documentation: "Selects one assembly component by name or ID.",
+        },
+        OPEN_SHELL,
+        ImportParameter {
+            name: "heal",
+            ty: DimType::Bool,
+            required: false,
+            documentation: "Repairs and sews exact geometry, then merges same-domain faces. Defaults to false.",
+        },
+        ImportParameter {
+            name: "sewing_tol",
+            ty: DimType::Length,
+            required: false,
+            documentation: "Positive sewing tolerance used when heal is true. Defaults to 0.001mm.",
+        },
+    ];
+    const MESH: &[ImportParameter] = &[
+        PATH,
+        ImportParameter {
+            name: "source_unit",
+            ty: DimType::Str,
+            required: false,
+            documentation: "Source length unit. STL and OBJ default to mm, glTF and GLB to m, and 3MF to the file unit.",
+        },
+        SHA256,
+        ImportParameter {
+            name: "cluster_analytic_faces",
+            ty: DimType::Bool,
+            required: false,
+            documentation: "Clusters approximate planar and cylindrical faces. Defaults to true.",
+        },
+        OPEN_SHELL,
+    ];
+    match callee {
+        "import::step" => Some(STEP),
+        "import::mesh" => Some(MESH),
+        _ => None,
+    }
+}
+
+#[derive(Debug)]
+pub struct ImportArgumentHover {
+    pub parameter: &'static ImportParameter,
+    pub span: Span,
+}
+
 /// Converts a literal quantity with an optional unit suffix into canonical units (`mm`, `deg`, `N`, `MPa`).
 pub fn convert_quantity(value: f64, unit: Option<&str>) -> Result<(f64, DimType, &'static str), String> {
     match unit {

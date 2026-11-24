@@ -1,18 +1,18 @@
 <#
 .SYNOPSIS
-    Idempotently fetch prebuilt OpenCASCADE (OCCT 7.8+) dynamic libraries for Windows (MSVC)
+    Idempotently fetch prebuilt OpenCASCADE (OCCT 7.9+) dynamic libraries for Windows (MSVC)
     from conda-forge into cpp/occt-prebuilt/, enforcing LGPL-2.1 dynamic linking boundaries.
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File scripts/fetch-occt-prebuilt.ps1 -DryRun
-    powershell -ExecutionPolicy Bypass -File scripts/fetch-occt-prebuilt.ps1 -OcctVersion 7.8
+    powershell -ExecutionPolicy Bypass -File scripts/fetch-occt-prebuilt.ps1 -OcctVersion 7.9
 #>
 [CmdletBinding()]
 param(
     [Alias("dry-run")]
     [switch]$DryRun,
 
-    [string]$OcctVersion = "7.8",
+    [string]$OcctVersion = "7.9",
 
     [string]$TargetDir = "",
 

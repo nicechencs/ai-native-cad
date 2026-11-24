@@ -1,331 +1,439 @@
 import { useState } from "react";
-import { createDesktopIpcClient, type ExportResult } from "../../../desktop/src/ipcBridge.ts";
+import { loadWorkbenchUiPrefs, updateWorkbenchUiPrefs } from "../core/layout/workbenchPrefsStore.ts";
+import type { ExportKind, WorkbenchBackend } from "../sync/workbenchBackend.ts";
 import { MATERIAL_PRESETS } from "../data/demoWorkbenchState.ts";
 import type {
-  AssemblyComponentInfo,
   DesignContract,
   DiagnosticsReport,
   MaterialPreset,
   SceneMeshPayload,
+  SelectionTarget,
 } from "../types/scene.ts";
+import type { CanonicalGraph, GraphPatch, ParameterDef } from "../types/graphIr.ts";
+import type { VerificationReport } from "../types/verification.ts";
+import { massGramsFromVolume } from "../sync/materialAnnotation.ts";
 import { computeEnvelopeStatus } from "../utils/metrics.ts";
-import {
-  generateFallbackDrawingSvg,
-  generateFallbackDxfFromMesh,
-} from "../utils/studioHelpers.ts";
+import { FeaturePropertyInspector } from "../features/feature-tree/FeaturePropertyInspector.tsx";
+import { ExplainModelPanel } from "../features/feature-tree/ExplainModelPanel.tsx";
+import { ValidationPanel } from "../features/validation/ValidationPanel.tsx";
+import type { ValidationJumpTarget } from "../features/validation/validationPanelModel.ts";
+import { exportBlockedDetail, geometryAvailabilityBadge } from "../hooks/quickFeatureOutcome.ts";
+import { CadIcon } from "../ui/icons/CadIcons.tsx";
+import { WorkbenchTabPanel, WorkbenchTabs } from "./WorkbenchTabs.tsx";
+
+const RIGHT_TABS = [
+  { id: "properties", label: "属性检查" },
+  { id: "export", label: "工程导出" },
+] as const;
+
+const PROPERTY_SUB_TABS = [
+  { id: "geometry", label: "上下文与指标" },
+  { id: "material", label: "材料与工艺" },
+] as const;
+
+type PropertySubTab = (typeof PROPERTY_SUB_TABS)[number]["id"];
+
+export type RightWorkbenchTab = (typeof RIGHT_TABS)[number]["id"];
 
 export interface RightPanelProps {
-  readonly kclSource: string;
-  readonly contract: DesignContract;
+  readonly activeTab: RightWorkbenchTab | null;
+  readonly onSelectTab: (tab: RightWorkbenchTab) => void;
+  readonly embedded?: boolean;
+  readonly onExport: (kind: ExportKind) => void;
+  readonly backendKind: WorkbenchBackend["kind"];
+  readonly canExport: boolean;
+  readonly compilePending?: boolean;
+  readonly showingLastAccepted?: boolean;
+  readonly hostModel: boolean;
+  readonly busyFormat?: ExportKind;
+  readonly exportMessage?: string;
+  readonly contract: DesignContract | null;
+  readonly verificationReport: VerificationReport;
   readonly diagnosticsReport: DiagnosticsReport;
   readonly sceneMesh: SceneMeshPayload;
   readonly selectedMaterial: MaterialPreset;
   readonly onSelectMaterial: (material: MaterialPreset) => void;
-  readonly dxfContent?: string;
-  readonly drawingSvg?: string;
-  readonly selectedComponentId?: string | null;
-  readonly onSelectComponent?: (componentId: string | null) => void;
-  readonly onExportComponent?: (componentId: string) => void;
+  readonly selectedTarget?: SelectionTarget;
+  readonly selectedCount?: number;
+  readonly graphIr?: CanonicalGraph | null;
+  readonly selectedNodeId?: string | null;
+  readonly onRenameNode?: (nodeId: string, name: string) => void;
+  readonly onSetNodeSuppressed?: (nodeId: string, suppressed: boolean) => void;
+  readonly onUpsertParameter?: (value: ParameterDef) => void;
+  readonly onEmitGraphPatch?: (patch: GraphPatch) => void;
+  readonly onFocusSource?: () => void;
+  readonly onTagSelected?: () => void;
+  readonly onJumpToViolation?: (target: ValidationJumpTarget) => void;
 }
 
-function triggerBrowserDownload(
-  filename: string,
-  content: string,
-  mimeType: string,
-): void {
-  if (typeof document === "undefined" || typeof URL === "undefined") {
-    return;
-  }
-  const blob = new Blob([content], { type: mimeType });
-  const a = document.createElement("a");
-  const objectUrl = URL.createObjectURL(blob);
-  a.href = objectUrl;
-  a.download = filename;
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
-}
-
+/**
+ * Unified Context-Aware Right Inspector & Export Drawer.
+ * - Eliminates the duplicate right Assembly tab (moved into Left Assembly Navigator)
+ * - Eliminates duplicate Material cards
+ * - Displays selected Feature Node parameters/lineage OR selected Face/Edge topology metadata
+ */
 export function RightPanel({
-  kclSource,
+  activeTab,
+  onSelectTab,
+  embedded = false,
+  onExport,
+  backendKind,
+  canExport,
+  compilePending = false,
+  showingLastAccepted = false,
+  hostModel,
+  busyFormat,
+  exportMessage,
   contract,
+  verificationReport,
   diagnosticsReport,
   sceneMesh,
   selectedMaterial,
   onSelectMaterial,
-  dxfContent,
-  drawingSvg,
-  selectedComponentId,
-  onSelectComponent,
-  onExportComponent,
+  selectedTarget = null,
+  selectedCount = 0,
+  graphIr = null,
+  selectedNodeId = null,
+  onRenameNode,
+  onSetNodeSuppressed,
+  onUpsertParameter,
+  onEmitGraphPatch,
+  onFocusSource,
+  onTagSelected,
+  onJumpToViolation,
 }: RightPanelProps) {
-  const [exportLog, setExportLog] = useState<string>(
-    "演示模式：可下载网格边线 DXF、工程图 SVG 和 Scene-Mesh JSON；真实工艺文件请使用完整工作台。",
-  );
-  const [busyFormat, setBusyFormat] = useState<string | null>(null);
+  const [propertySubTab, setPropertySubTab] = useState<PropertySubTab>(() => loadWorkbenchUiPrefs().propertySubTab);
+  const selectPropertySubTab = (tab: PropertySubTab) => {
+    setPropertySubTab(tab);
+    updateWorkbenchUiPrefs({ propertySubTab: tab });
+  };
+
+  const blockedDetail = exportBlockedDetail({
+    pending: compilePending,
+    faceCount: sceneMesh.faces.length,
+    diagnosticsStatus: diagnosticsReport.status,
+    showingLastAccepted,
+  });
+  const exportLog = busyFormat
+    ? "正在导出模型…"
+    : exportMessage ??
+      (!canExport
+        ? (blockedDetail ?? "当前源码没有可导出的网格。")
+        : !hostModel
+          ? "离线预览仅支持网格边线 DXF、预览工程图 SVG 和网格 JSON。"
+          : "选择格式导出当前编译模型。");
 
   const metrics = diagnosticsReport.metrics;
   const volumeCm3 = metrics.volume_mm3 / 1000;
-  const massGrams = volumeCm3 * selectedMaterial.density_g_cm3;
-  const {
-    bboxSizeX,
-    bboxSizeY,
-    bboxSizeZ,
-    envelopeRatio,
-    barWidthPercent,
-    isExceeded: isEnvelopeExceeded,
-  } = computeEnvelopeStatus(metrics.bbox_mm, contract.keep_in_bbox_mm);
-
-  const components: readonly AssemblyComponentInfo[] =
-    sceneMesh.components ?? diagnosticsReport.components ?? [];
-
+  const massGrams = massGramsFromVolume(metrics.volume_mm3, selectedMaterial.density_g_cm3);
+  const envelope = contract
+    ? computeEnvelopeStatus(metrics.bbox_mm, contract.keep_in_bbox_mm)
+    : null;
   const estimatedUnitCostUsd =
-    14.5 + (volumeCm3 * 0.12) * (100 / selectedMaterial.machinability_index);
+    14.5 + volumeCm3 * 0.12 * (100 / selectedMaterial.machinability_index);
 
-  const ipc = createDesktopIpcClient();
-
-  const handleExport = async (kind: "step" | "dxf" | "drawing" | "mesh") => {
-    setBusyFormat(kind);
-    try {
-      if (kind === "step") {
-        const res: ExportResult = await ipc.exportStepAp242({
-          file_name: `${sceneMesh.part_name}.kcl`,
-          source: kclSource,
-          out_path: `out/${sceneMesh.part_name}.step`,
-          include_pmi: true,
-        });
-        setExportLog(`[STEP AP242] ${res.message} -> ${res.out_path}`);
-      } else if (kind === "dxf") {
-        const dxfText = dxfContent ?? generateFallbackDxfFromMesh(sceneMesh);
-        triggerBrowserDownload(
-          `${sceneMesh.part_name}.dxf`,
-          dxfText,
-          "application/dxf",
-        );
-        setExportLog(`[网格边线 DXF] 已下载 ${dxfText.length} 字节，仅供预览，不用于切割。`);
-      } else if (kind === "drawing") {
-        const svgText =
-          drawingSvg ?? generateFallbackDrawingSvg(sceneMesh, metrics, {});
-        triggerBrowserDownload(
-          `${sceneMesh.part_name}_drawing.svg`,
-          svgText,
-          "image/svg+xml",
-        );
-        setExportLog(
-          `[2D 工程制图 SVG] 已导出图框与标注图纸 (${svgText.length} 字节)`,
-        );
-      } else {
-        const json = JSON.stringify(sceneMesh, null, 2);
-        triggerBrowserDownload(`${sceneMesh.part_name}.mesh.json`, json, "application/json");
-        setExportLog(`[Scene-Mesh ${sceneMesh.format_version}] 已下载网格 JSON。`);
-      }
-    } catch (err) {
-      setExportLog(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusyFormat(null);
-    }
-  };
+  const selectedGraphNode = graphIr && selectedNodeId ? graphIr.nodes[selectedNodeId] ?? null : null;
 
   return (
-    <aside className="panel panel-right" aria-label="物理估算、BOM 拆件、材料与导出仪表盘">
-      {/* 1. 体积/质量/水密性物理仪表盘 */}
-      <section className="card">
-        <div className="card-header">
-          <span className="card-title">工程量纲与质量估算</span>
-          <span
-            className={`badge ${
-              metrics.watertight ? "badge-ok" : "badge-err"
-            }`}
-          >
-            {metrics.watertight ? "L0 水密流形" : "几何超限"}
-          </span>
-        </div>
-
-        <div className="kpi-grid">
-          <div className="kpi-box">
-            <span className="kpi-label">净体积</span>
-            <strong className="kpi-value">{volumeCm3.toFixed(2)} cm³</strong>
-            <span className="kpi-sub">{metrics.volume_mm3.toFixed(0)} mm³</span>
-          </div>
-          <div className="kpi-box">
-            <span className="kpi-label">估算质量</span>
-            <strong className="kpi-value">{massGrams.toFixed(1)} g</strong>
-            <span className="kpi-sub">{(massGrams / 1000).toFixed(3)} kg</span>
-          </div>
-          <div className="kpi-box">
-            <span className="kpi-label">预估单件加工</span>
-            <strong className="kpi-value">${estimatedUnitCostUsd.toFixed(1)}</strong>
-            <span className="kpi-sub">{contract.manufacturing_method}</span>
-          </div>
-          <div className="kpi-box">
-            <span className="kpi-label">拓扑面 / 边</span>
-            <strong className="kpi-value">
-              {metrics.face_count}F / {metrics.edge_count}E
-            </strong>
-            <span className="kpi-sub">
-              {typeof metrics.open_edge_count === "number"
-                ? `Open Edges: ${metrics.open_edge_count}`
-                : "TNP Provenance 100%"}
-            </span>
-          </div>
-        </div>
-
-        <div className="envelope-meter">
-          <div className="envelope-meter-header">
-            <span>
-              包围盒包络占用率
-              {isEnvelopeExceeded ? "（已超限）" : ""}
-            </span>
-            <span>
-              {bboxSizeX.toFixed(1)} × {bboxSizeY.toFixed(1)} ×{" "}
-              {bboxSizeZ.toFixed(1)} mm ({envelopeRatio}%)
-            </span>
-          </div>
-          <div className="progress-track">
-            <div
-              className={`progress-fill ${
-                isEnvelopeExceeded ? "over" : "normal"
-              }`}
-              style={{ width: `${barWidthPercent}%` }}
-            />
-          </div>
-        </div>
-      </section>
-
-      {/* 2. 装配体 BOM 拆件面板 */}
-      {components.length > 0 && (
-        <section className="card">
-          <div className="card-header">
-            <span className="card-title">装配体 BOM ({components.length})</span>
-            {selectedComponentId && onSelectComponent && (
-              <button
-                type="button"
-                className="pill-btn"
-                onClick={() => onSelectComponent(null)}
-              >
-                全部显示
-              </button>
-            )}
-          </div>
-          <ul className="bom-list">
-            {components.map((comp) => {
-              const isSelected = selectedComponentId === comp.component_id;
-              return (
-                <li key={comp.component_id} className={`bom-item ${isSelected ? "active" : ""}`}>
-                  <button
-                    type="button"
-                    className="bom-select-btn"
-                    onClick={() =>
-                      onSelectComponent?.(isSelected ? null : comp.component_id)
-                    }
-                  >
-                    <strong>{comp.part_name}</strong>
-                    <span>#{comp.component_id}</span>
-                  </button>
-                  {onExportComponent && (
-                    <button
-                      type="button"
-                      className="pill-btn"
-                      onClick={() => onExportComponent(comp.component_id)}
-                    >
-                      拆件导出
-                    </button>
-                  )}
-                </li>
-              );
-            })}
-          </ul>
-        </section>
+    <div className={embedded ? "panel-embedded" : "panel panel-right workbench-side"} aria-label="属性检查与工程导出">
+      {!embedded && (
+        <WorkbenchTabs
+          prefix="right"
+          label="属性检查与工程导出"
+          tabs={RIGHT_TABS}
+          active={activeTab ?? "properties"}
+          onSelect={onSelectTab}
+          className="workbench-side-tabs"
+        />
       )}
 
-      {/* 3. 材料选型与力学基线 */}
-      <section className="card">
-        <div className="card-header">
-          <span className="card-title">材料与工艺属性</span>
-        </div>
-        <label className="field-label" htmlFor="material-select">
-          工程材料牌号
-        </label>
-        <select
-          id="material-select"
-          className="select-input"
-          value={selectedMaterial.id}
-          onChange={(e) => {
-            const next = MATERIAL_PRESETS.find((m) => m.id === e.target.value);
-            if (next) {
-              onSelectMaterial(next);
-            }
-          }}
-        >
-          {MATERIAL_PRESETS.map((mat) => (
-            <option key={mat.id} value={mat.id}>
-              {mat.id} — {mat.name}
-            </option>
-          ))}
-        </select>
-        <dl className="contract-grid compact">
-          <div>
-            <dt>密度</dt>
-            <dd>{selectedMaterial.density_g_cm3} g/cm³</dd>
-          </div>
-          <div>
-            <dt>屈服强度</dt>
-            <dd>{selectedMaterial.yield_strength_mpa} MPa</dd>
-          </div>
-          <div>
-            <dt>可加工性指数</dt>
-            <dd>{selectedMaterial.machinability_index} / 100</dd>
-          </div>
-          <div>
-            <dt>轴向设计载荷</dt>
-            <dd>
-              {contract.loads[0]?.magnitude ?? 0}{" "}
-              {contract.loads[0]?.unit ?? "N"}
-            </dd>
-          </div>
-        </dl>
-      </section>
+      <WorkbenchTabPanel prefix="right" id="properties" active={activeTab === "properties"} className="workbench-side-tabpanel">
+        <WorkbenchTabs
+          prefix="right-props-sub"
+          label="属性子视图"
+          tabs={PROPERTY_SUB_TABS}
+          active={propertySubTab}
+          onSelect={selectPropertySubTab}
+          className="panel-subtabs"
+          tabClassName={(_tab, active) => `panel-subtab${active ? " is-active" : ""}`}
+        />
 
-      {/* 4. STEP AP242 / 1:1 DXF / 2D 工程制图导出 */}
-      <section className="card">
-        <div className="card-header">
-          <span className="card-title">工业标准导出控制</span>
-        </div>
-        <div className="export-actions">
-          <button
-            type="button"
-            className="btn-primary"
-            disabled={busyFormat !== null}
-            onClick={() => void handleExport("step")}
-          >
-            {busyFormat === "step" ? "导出中..." : "导出 STEP AP242 (含 PMI)"}
-          </button>
-          <button
-            type="button"
-            className="btn-secondary"
-            disabled={busyFormat !== null}
-            onClick={() => void handleExport("dxf")}
-          >
-            {busyFormat === "dxf" ? "导出中..." : "下载网格边线 DXF（仅预览）"}
-          </button>
-          <button
-            type="button"
-            className="btn-secondary"
-            disabled={busyFormat !== null}
-            onClick={() => void handleExport("drawing")}
-          >
-            {busyFormat === "drawing" ? "导出中..." : "下载 2D 工程制图 (.svg)"}
-          </button>
-          <button
-            type="button"
-            className="btn-secondary"
-            disabled={busyFormat !== null}
-            onClick={() => void handleExport("mesh")}
-          >
-            下载 Scene-Mesh JSON
-          </button>
-        </div>
-        <pre className="export-log">{exportLog}</pre>
-      </section>
-    </aside>
+        <WorkbenchTabPanel
+          prefix="right-props-sub"
+          id="geometry"
+          active={propertySubTab === "geometry"}
+          className="panel-subtabpanel"
+        >
+          {/* Context card 1: Selected 3D Topology Entity */}
+          {selectedTarget && (
+            <section className="card inspector-context-card" aria-label="选中几何拓扑属性">
+              <div className="card-header">
+                <span className="card-title">
+                  {selectedTarget.kind === "face" ? "选中实体面" : "选中拓扑边"}
+                </span>
+                <span className="mini-badge">
+                  {selectedCount > 1 ? `共选中 ${selectedCount} 项` : selectedTarget.kind.toUpperCase()}
+                </span>
+              </div>
+              <dl className="contract-grid compact">
+                <div>
+                  <dt>Topo ID</dt>
+                  <dd>
+                    <code>{selectedTarget.kind === "face" ? selectedTarget.face.face_id : selectedTarget.edge.edge_id}</code>
+                  </dd>
+                </div>
+                <div>
+                  <dt>几何类型</dt>
+                  <dd>{selectedTarget.kind === "face" ? selectedTarget.face.surface_type : selectedTarget.edge.curve_type}</dd>
+                </div>
+                <div>
+                  <dt>血缘标签</dt>
+                  <dd>
+                    {(selectedTarget.kind === "face"
+                      ? selectedTarget.face.provenance_tags
+                      : selectedTarget.edge.provenance_tags
+                    ).join(", ") || "无"}
+                  </dd>
+                </div>
+                <div>
+                  <dt>KCL 位置</dt>
+                  <dd>
+                    L{selectedTarget.kind === "face"
+                      ? `${selectedTarget.face.ast_span.start_line}..${selectedTarget.face.ast_span.end_line}`
+                      : `${selectedTarget.edge.ast_span.start_line}..${selectedTarget.edge.ast_span.end_line}`}
+                  </dd>
+                </div>
+              </dl>
+              <div className="pill-group" style={{ marginTop: 6 }}>
+                {onFocusSource && (
+                  <button type="button" className="pill-btn" onClick={onFocusSource}>
+                    <CadIcon name="code" size={12} />
+                    <span>定位源码 (F12)</span>
+                  </button>
+                )}
+                {onTagSelected && (
+                  <button type="button" className="pill-btn" onClick={onTagSelected}>
+                    <CadIcon name="tag" size={12} />
+                    <span>语义打标</span>
+                  </button>
+                )}
+              </div>
+            </section>
+          )}
+
+          {/* Context card 2: Selected Parametric Feature Node (moved from left tree bottom) */}
+          {graphIr && selectedGraphNode && onEmitGraphPatch && (
+            <>
+              <FeaturePropertyInspector
+                graph={graphIr}
+                node={selectedGraphNode}
+                onRenameNode={onRenameNode}
+                onSetNodeSuppressed={onSetNodeSuppressed}
+                onUpsertParameter={onUpsertParameter}
+                onEmitPatch={onEmitGraphPatch}
+              />
+              <ExplainModelPanel
+                graph={graphIr}
+                nodeId={selectedNodeId}
+                contract={contract}
+              />
+            </>
+          )}
+
+          {/* Part-level mass & verification metrics */}
+          <section className="card">
+            <div className="card-header">
+              <span className="card-title">零件质量与验证</span>
+              <span
+                className={`badge ${
+                  compilePending || diagnosticsReport.status === "error" || !metrics.watertight
+                    ? "badge-err"
+                    : "badge-ok"
+                }`}
+              >
+                {geometryAvailabilityBadge({
+                  pending: compilePending,
+                  faceCount: sceneMesh.faces.length,
+                  diagnosticsStatus: diagnosticsReport.status,
+                  watertight: metrics.watertight,
+                })}
+              </span>
+            </div>
+
+            <div className="kpi-grid">
+              <div className="kpi-box">
+                <span className="kpi-label">净体积</span>
+                <strong className="kpi-value">{volumeCm3.toFixed(2)} cm³</strong>
+                <span className="kpi-sub">{metrics.volume_mm3.toFixed(0)} mm³</span>
+              </div>
+              <div className="kpi-box">
+                <span className="kpi-label">估算质量</span>
+                <strong className="kpi-value">{massGrams.toFixed(1)} g</strong>
+                <span className="kpi-sub">{(massGrams / 1000).toFixed(3)} kg</span>
+              </div>
+              <div className="kpi-box">
+                <span className="kpi-label">预估单件加工</span>
+                <strong className="kpi-value">${estimatedUnitCostUsd.toFixed(1)}</strong>
+                <span className="kpi-sub">{contract?.manufacturing_method ?? verificationReport.overall_status}</span>
+              </div>
+              <div className="kpi-box">
+                <span className="kpi-label">拓扑面 / 边</span>
+                <strong className="kpi-value">
+                  {metrics.face_count}F / {metrics.edge_count}E
+                </strong>
+                <span className="kpi-sub">
+                  {typeof metrics.open_edge_count === "number"
+                    ? `Open Edges: ${metrics.open_edge_count}`
+                    : "TNP Provenance 100%"}
+                </span>
+              </div>
+            </div>
+
+            {envelope ? (
+              <div className="envelope-meter">
+                <div className="envelope-meter-header">
+                  <span>
+                    Keep-In 包络占用率
+                    {envelope.isExceeded ? "（已超限）" : ""}
+                  </span>
+                  <span>
+                    {envelope.bboxSizeX.toFixed(1)} × {envelope.bboxSizeY.toFixed(1)} ×{" "}
+                    {envelope.bboxSizeZ.toFixed(1)} mm ({envelope.envelopeRatio}%)
+                  </span>
+                </div>
+                <div className="progress-track">
+                  <div
+                    className={`progress-fill ${envelope.isExceeded ? "over" : "normal"}`}
+                    style={{ width: `${envelope.barWidthPercent}%` }}
+                  />
+                </div>
+              </div>
+            ) : (
+              <div className="envelope-meter">
+                <div className="envelope-meter-header">
+                  <span>UNKNOWN</span>
+                  <span>No design contract attached</span>
+                </div>
+              </div>
+            )}
+            <ValidationPanel report={verificationReport} onJump={onJumpToViolation} />
+          </section>
+        </WorkbenchTabPanel>
+
+        <WorkbenchTabPanel
+          prefix="right-props-sub"
+          id="material"
+          active={propertySubTab === "material"}
+          className="panel-subtabpanel"
+        >
+          <section className="card">
+            <div className="card-header">
+              <span className="card-title">材料与工艺属性</span>
+              <span className="mini-badge">{contract?.interfaces.length ?? 0} 接口</span>
+            </div>
+            <label className="field-label" htmlFor="material-select">
+              工程材料牌号（SSOT）
+            </label>
+            <select
+              id="material-select"
+              className="select-input"
+              value={selectedMaterial.id}
+              onChange={(e) => {
+                const next = MATERIAL_PRESETS.find((m) => m.id === e.target.value);
+                if (next) {
+                  onSelectMaterial(next);
+                }
+              }}
+            >
+              {MATERIAL_PRESETS.map((mat) => (
+                <option key={mat.id} value={mat.id}>
+                  {mat.id} — {mat.name}
+                </option>
+              ))}
+            </select>
+            <dl className="contract-grid compact">
+              <div>
+                <dt>密度</dt>
+                <dd>{selectedMaterial.density_g_cm3} g/cm³</dd>
+              </div>
+              <div>
+                <dt>屈服强度</dt>
+                <dd>{selectedMaterial.yield_strength_mpa} MPa</dd>
+              </div>
+              <div>
+                <dt>可加工性指数</dt>
+                <dd>{selectedMaterial.machinability_index} / 100</dd>
+              </div>
+              <div>
+                <dt>轴向设计载荷</dt>
+                <dd>
+                  {contract?.loads[0]?.magnitude ?? 0}{" "}
+                  {contract?.loads[0]?.unit ?? "N"}
+                </dd>
+              </div>
+              <div>
+                <dt>配合接口</dt>
+                <dd>
+                  {contract
+                    ? contract.interfaces.map((item) => item.tolerance ?? item.interface_id).join(" · ") || "无"
+                    : "No design contract attached"}
+                </dd>
+              </div>
+            </dl>
+          </section>
+        </WorkbenchTabPanel>
+      </WorkbenchTabPanel>
+
+      <WorkbenchTabPanel prefix="right" id="export" active={activeTab === "export"} className="workbench-side-tabpanel">
+        <section className="card">
+          <div className="card-header">
+            <span className="card-title">工程交付与格式导出</span>
+          </div>
+          <div className="export-actions">
+            <button
+              type="button"
+              className="btn-primary"
+              disabled={!canExport || !hostModel || busyFormat !== undefined}
+              onClick={() => onExport("step")}
+            >
+              {busyFormat === "step" ? "导出中..." : backendKind === "tauri" ? "导出 STEP AP242 (含 PMI)" : "下载 STEP AP242"}
+            </button>
+            <button
+              type="button"
+              className="btn-secondary"
+              disabled={!canExport || busyFormat !== undefined}
+              onClick={() => onExport("dxf")}
+            >
+              {busyFormat === "dxf" ? "导出中..." : backendKind === "http" && hostModel ? "下载 DXF" : "下载网格边线 DXF（仅预览）"}
+            </button>
+            <button
+              type="button"
+              className="btn-secondary"
+              disabled={!canExport || busyFormat !== undefined}
+              onClick={() => onExport("drawing")}
+            >
+              {busyFormat === "drawing" ? "导出中..." : backendKind === "http" && hostModel ? "下载 2D 工程图 SVG" : "下载预览工程图 SVG"}
+            </button>
+            <button
+              type="button"
+              className="btn-secondary"
+              disabled={!canExport || !hostModel || busyFormat !== undefined}
+              onClick={() => onExport("3mf")}
+            >
+              {busyFormat === "3mf" ? "导出中..." : backendKind === "tauri" ? "导出 3MF" : "下载 3MF"}
+            </button>
+            <button
+              type="button"
+              className="btn-secondary"
+              disabled={!canExport || busyFormat !== undefined}
+              onClick={() => onExport("mesh")}
+            >
+              {busyFormat === "mesh" ? "导出中..." : "下载 Scene-Mesh JSON"}
+            </button>
+          </div>
+          <pre className="export-log" role="status">{exportLog}</pre>
+        </section>
+      </WorkbenchTabPanel>
+    </div>
   );
 }

@@ -1,0 +1,20 @@
+[package]
+name = "cad-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Thin MCP protocol gateway: eight orthogonal tools, aicad:// resources, stdio, and loopback Streamable HTTP."
+
+[dependencies]
+cad-api.workspace = true
+cad-ir.workspace = true
+cad-runtime.workspace = true
+cad-stdlib.workspace = true
+cad-topo.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+cad-kernel-occt.workspace = true
+cad-syntax.workspace = true

@@ -28,7 +28,7 @@
     },
     "diagnostics": {
       "type": "array",
-      "description": "Compiler, dimensional type, topology disambiguation, constraint solver, or B-Rep gate diagnostics.",
+      "description": "Compiler, dimensional type, topology disambiguation, constraint solver, B-Rep gate, or external asset diagnostics.",
       "items": {
         "type": "object",
         "required": ["code", "severity", "message", "span"],
@@ -37,7 +37,16 @@
           "code": {
             "type": "string",
             "minLength": 1,
-            "description": "Stable diagnostic code, e.g. E002_SYNTAX_ERROR, E102_UNIT_MISMATCH, E201_AMBIGUOUS_TOPOLOGY, E205_INVALID_FILLET_CHAMFER, E206_INVALID_SHELL_THICKNESS, E207_INVALID_FEATURE, E208_INVALID_ASSEMBLY_MATE, E209_INVALID_THREAD_SPEC, E301_NON_WATERTIGHT."
+            "description": "Stable diagnostic code, e.g. E002_SYNTAX_ERROR, E102_UNIT_MISMATCH, E201_AMBIGUOUS_TOPOLOGY, E205_INVALID_FILLET_CHAMFER, E206_INVALID_SHELL_THICKNESS, E207_INVALID_FEATURE, E208_INVALID_ASSEMBLY_MATE, E209_INVALID_THREAD_SPEC, E301_NON_WATERTIGHT. Import and interference codes are E501–E507.",
+            "examples": [
+              "E501_ASSET_NOT_FOUND",
+              "E502_UNSAFE_ASSET_PATH",
+              "E503_ASSET_HASH_MISMATCH",
+              "E504_UNSUPPORTED_IMPORT_FORMAT",
+              "E505_IMPORT_NON_MANIFOLD_OR_OPEN",
+              "E506_INTERFERENCE_DETECTED",
+              "E507_UNSUPPORTED_MIXED_BOOLEAN"
+            ]
           },
           "severity": {
             "type": "string",
@@ -60,7 +69,7 @@
       }
     },
     "metrics": {
-      "type": "object",
+      "type": ["object", "null"],
       "required": ["watertight", "volume_mm3", "bbox_mm", "face_count", "edge_count"],
       "additionalProperties": true,
       "properties": {
@@ -142,6 +151,7 @@
         "mesh_path": { "type": "string" },
         "views_dir": { "type": "string" },
         "dxf_path": { "type": "string" },
+        "dxf_view_path": { "type": "string", "description": "Native XY engineering view (not a cut profile)." },
         "drawing_path": { "type": "string" }
       },
       "additionalProperties": true

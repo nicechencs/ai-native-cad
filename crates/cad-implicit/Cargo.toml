@@ -1,0 +1,17 @@
+[package]
+name = "cad-implicit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+cad-ir.workspace = true
+cad-observe.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+cad-observe = { workspace = true, features = ["sink"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true

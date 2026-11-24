@@ -1,113 +1,40 @@
-use cad_kernel_occt::{BBox3, CheckReport, ComponentMeta, SolidShape, SurfaceType};
-use cad_syntax::Span;
-use serde::{Deserialize, Serialize};
+use cad_kernel_occt::{BBox3, CheckReport, SolidShape};
 use std::fmt::Write;
 
+pub mod associative_drawing;
+mod camera;
+mod compact_scene;
 mod drawing;
 mod dxf;
+#[cfg(feature = "wgpu-renderer")]
+mod gpu;
+mod hlr;
+mod picking;
 
-pub use drawing::{DrawingOptions, render_drawing_svg};
-pub use dxf::render_dxf;
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct FaceMesh {
-    pub face_id: String,
-    pub surface_type: SurfaceType,
-    pub vertices: Vec<f64>,
-    pub normals: Vec<f64>,
-    pub indices: Vec<u32>,
-    pub provenance_tags: Vec<String>,
-    pub exact_interface: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub component_id: Option<String>,
-    pub ast_span: Span,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TopoEdge {
-    pub edge_id: String,
-    pub curve_type: cad_kernel_occt::CurveType,
-    pub polyline: Vec<f64>,
-    pub provenance_tags: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub component_id: Option<String>,
-    pub ast_span: Span,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct EditHandle {
-    pub handle_id: String,
-    pub param_name: String,
-    pub tier: u8,
-    pub current_value: f64,
-    pub unit: String,
-    pub ast_span: Span,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub upstream_param: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub offset_value: Option<f64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SceneMeshPayload {
-    pub format_version: String,
-    pub part_name: String,
-    pub kind: String,
-    pub units: String,
-    pub faces: Vec<FaceMesh>,
-    pub edges: Vec<TopoEdge>,
-    pub edit_handles: Vec<EditHandle>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub components: Vec<ComponentMeta>,
-}
-
-pub fn build_scene_mesh(shape: &SolidShape, edit_handles: Vec<EditHandle>) -> SceneMeshPayload {
-    let faces = shape
-        .faces
-        .iter()
-        .map(|f| FaceMesh {
-            face_id: f.face_id.clone(),
-            surface_type: f.surface_type,
-            vertices: f.vertices.clone(),
-            normals: f.normals.clone(),
-            indices: f.indices.clone(),
-            provenance_tags: f.provenance_tags.clone(),
-            exact_interface: f.exact_interface,
-            component_id: f.component_id.clone(),
-            ast_span: f.ast_span,
-        })
-        .collect();
-
-    let edges = shape
-        .edges
-        .iter()
-        .map(|e| TopoEdge {
-            edge_id: e.edge_id.clone(),
-            curve_type: e.curve_type,
-            polyline: e.polyline.clone(),
-            provenance_tags: e.provenance_tags.clone(),
-            component_id: e.component_id.clone(),
-            ast_span: e.ast_span,
-        })
-        .collect();
-
-    let kind = if shape.components.is_empty() {
-        "part".to_string()
-    } else {
-        "assembly".to_string()
-    };
-
-    SceneMeshPayload {
-        format_version: "0.1".to_string(),
-        part_name: shape.part_name.clone(),
-        kind,
-        units: "mm".to_string(),
-        faces,
-        edges,
-        edit_handles,
-        components: shape.components.clone(),
-    }
-}
+pub use associative_drawing::{
+    DimensionStatus, LabelBox, PlacedDimension, ResolvedDimension, ResolvedDrawingSheet,
+    render_associative_sheet_svg, resolve_drawing_sheet, resolve_label_overlaps,
+};
+pub use cad_scene_mesh::{
+    EditHandle, FaceMesh, HoleOffsetHandle, SceneMeshPayload, TopoEdge, build_scene_mesh,
+};
+pub use camera::{
+    Camera, ProjectionMode, ViewPreset, camera_relative_position_mm, camera_relative_translation,
+};
+pub use compact_scene::{
+    CMS2_ENVELOPE_MAGIC, CadEdgeSegment, CadVertex, CompactScene, EdgeRecord, FaceRecord,
+    PartPrototype, SceneInstance, decode_cms2_envelope, encode_cms2_envelope,
+};
+pub use drawing::{DrawingOptions, render_drawing_svg, try_render_drawing_svg};
+pub use dxf::{render_dxf, render_dxf_view};
+#[cfg(feature = "wgpu-renderer")]
+pub use gpu::{
+    ClipPlane, RenderEngine, RenderImage, RenderOptions, RenderedFrame, SemanticEntry,
+};
+pub use picking::{
+    PickHit, PickRay, PickTargetMode, RenderPassOptions, SectionPlane, pick_pixel,
+    pick_pixel_with_options, pixel_ray, project_world_point_to_pixel,
+};
 
 #[derive(Debug, Clone)]
 pub struct RenderedViews {
@@ -117,7 +44,7 @@ pub struct RenderedViews {
     pub iso_svg: String,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ViewKind {
     Front,
     Top,
@@ -157,6 +84,7 @@ impl ViewKind {
     }
 }
 
+/// Renders shaded mesh previews (including for native B-Reps).
 pub fn render_views_svg(shape: &SolidShape, check: &CheckReport) -> RenderedViews {
     RenderedViews {
         front_svg: render_single_view(shape, check, ViewKind::Front),
@@ -164,6 +92,60 @@ pub fn render_views_svg(shape: &SolidShape, check: &CheckReport) -> RenderedView
         right_svg: render_single_view(shape, check, ViewKind::Right),
         iso_svg: render_single_view(shape, check, ViewKind::Iso),
     }
+}
+
+/// Uses exact HLR for native engineering views; analytic and mesh geometry
+/// keep the existing preview renderer. Reports native failures to the caller.
+pub fn try_render_views_svg(
+    shape: &SolidShape,
+    check: &CheckReport,
+) -> Result<RenderedViews, String> {
+    let render = |view| {
+        Ok::<_, String>(match hlr::project(shape, view)? {
+            Some(projection) => render_hlr_view(shape, check, view, &projection),
+            None => render_single_view(shape, check, view),
+        })
+    };
+    Ok(RenderedViews {
+        front_svg: render(ViewKind::Front)?,
+        top_svg: render(ViewKind::Top)?,
+        right_svg: render(ViewKind::Right)?,
+        iso_svg: render(ViewKind::Iso)?,
+    })
+}
+
+fn render_hlr_view(
+    shape: &SolidShape,
+    check: &CheckReport,
+    view: ViewKind,
+    projection: &cad_kernel_occt::hlr::HlrProjection,
+) -> String {
+    let bounds = bbox_corners(check.bbox_mm).map(|p| hlr::project_point(view, p));
+    let range = |axis| {
+        bounds
+            .iter()
+            .map(|p: &[f64; 2]| p[axis])
+            .fold([f64::INFINITY, f64::NEG_INFINITY], |[min, max], v| {
+                [min.min(v), max.max(v)]
+            })
+    };
+    let ([u0, u1], [v0, v1]) = (range(0), range(1));
+    let scale = (512.0 / (u1 - u0).max(1.0)).min(322.0 / (v1 - v0).max(1.0));
+    let mut svg = String::from(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="640" height="480" viewBox="0 0 640 480">
+<rect width="100%" height="100%" fill="white"/>
+<style>polyline{fill:none;stroke:#142130;stroke-linejoin:round;stroke-linecap:round}.visible{stroke-width:1.5}.hidden{stroke-width:1;stroke-dasharray:5 3}</style>
+"##,
+    );
+    hlr::draw_svg(&mut svg, projection, |[x, y]| {
+        [
+            320.0 + (x - (u0 + u1) * 0.5) * scale,
+            230.0 - (y - (v0 + v1) * 0.5) * scale,
+        ]
+    });
+    write_view_footer(&mut svg, shape, check, view, 480.0, ["#142130", "#425166"]);
+    svg.push_str("</svg>\n");
+    svg
 }
 
 fn render_single_view(shape: &SolidShape, check: &CheckReport, view: ViewKind) -> String {
@@ -310,18 +292,30 @@ fn render_single_view(shape: &SolidShape, check: &CheckReport, view: ViewKind) -
         );
     }
 
-    // Engineering HUD footer
-    let sz = bb.size();
+    write_view_footer(&mut svg, shape, check, view, h, ["#f8fafc", "#94a3b8"]);
+    let _ = writeln!(svg, "</svg>");
+    svg
+}
+
+fn write_view_footer(
+    svg: &mut String,
+    shape: &SolidShape,
+    check: &CheckReport,
+    view: ViewKind,
+    height: f64,
+    [title_color, footer_color]: [&str; 2],
+) {
+    let sz = check.bbox_mm.size();
     let _ = writeln!(
         svg,
-        "  <text x=\"16\" y=\"26\" fill=\"#f8fafc\" font-family=\"monospace\" font-size=\"14\" font-weight=\"bold\">{} — {}</text>",
+        "  <text x=\"16\" y=\"26\" fill=\"{title_color}\" font-family=\"monospace\" font-size=\"14\" font-weight=\"bold\">{} — {}</text>",
         drawing::escape_xml(&shape.part_name),
         view.title()
     );
     let _ = writeln!(
         svg,
-        "  <text x=\"16\" y=\"{}\" fill=\"#94a3b8\" font-family=\"monospace\" font-size=\"12\">BBox: {:.2} x {:.2} x {:.2} mm | Vol: {:.1} mm3 | Faces: {} | Watertight: {}</text>",
-        h - 14.0,
+        "  <text x=\"16\" y=\"{}\" fill=\"{footer_color}\" font-family=\"monospace\" font-size=\"12\">BBox: {:.2} x {:.2} x {:.2} mm | Vol: {:.1} mm3 | Faces: {} | Watertight: {}</text>",
+        height - 14.0,
         sz[0],
         sz[1],
         sz[2],
@@ -329,8 +323,6 @@ fn render_single_view(shape: &SolidShape, check: &CheckReport, view: ViewKind) -
         check.face_count,
         check.watertight
     );
-    let _ = writeln!(svg, "</svg>");
-    svg
 }
 
 fn bbox_corners(bb: BBox3) -> [[f64; 3]; 8] {

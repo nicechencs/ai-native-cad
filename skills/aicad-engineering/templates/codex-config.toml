@@ -1,0 +1,24 @@
+# OpenAI Codex MCP snippet. Merge one server block into ~/.codex/config.toml
+# or the project .codex/config.toml.
+#
+# cad-cli registers the `mcp` subcommand (stdio, server name aicad-mcp).
+# Pick one mode. Leave only one [mcp_servers.aicad] block active.
+#
+# 1. Desktop Live-Attach. The desktop app publishes .aicad-runtime.json.
+#    Args: ["mcp", "--workspace", "."]
+# 2. Headless terminal or CI. No desktop session.
+#    Args: ["mcp", "--workspace", ".", "--project", "part.aicad"]
+#
+# HTTP for a remote Codex host is in grok-http-setup.md.
+# Do not put a bearer token in this file.
+
+# --- Mode 1: Live-Attach (active) ---
+[mcp_servers.aicad]
+command = "cad-cli"
+args = ["mcp", "--workspace", "."]
+
+# --- Mode 2: headless terminal / CI ---
+# Comment out Mode 1 and uncomment this block.
+# [mcp_servers.aicad]
+# command = "cad-cli"
+# args = ["mcp", "--workspace", ".", "--project", "part.aicad"]

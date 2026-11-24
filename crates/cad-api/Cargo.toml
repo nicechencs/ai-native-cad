@@ -1,0 +1,12 @@
+[package]
+name = "cad-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Semantic CAD API: intent commands compiled into atomic cad-ir graph patches."
+
+[dependencies]
+cad-ir.workspace = true
+cad-stdlib.workspace = true
+serde.workspace = true
+serde_json = { workspace = true, features = ["float_roundtrip"] }

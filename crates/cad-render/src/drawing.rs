@@ -1,5 +1,5 @@
-use super::{ViewKind, bbox_corners};
-use cad_kernel_occt::{BBox3, CheckReport, PmiRecord, SolidShape};
+use super::{ViewKind, bbox_corners, hlr};
+use cad_kernel_occt::{BBox3, CheckReport, PmiRecord, SolidShape, hlr::HlrProjection};
 use std::fmt::Write;
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -9,12 +9,37 @@ pub struct DrawingOptions<'a> {
     pub additional_pmi: &'a [PmiRecord],
 }
 
-/// Produces a third-angle engineering sheet, with a common orthographic scale.
-/// Views show projected outlines and the available B-Rep edge polylines.
+/// Produces the legacy third-angle wireframe engineering sheet. Use
+/// [`try_render_drawing_svg`] to use exact HLR on native B-Reps.
 pub fn render_drawing_svg(
     shape: &SolidShape,
     check: &CheckReport,
     options: DrawingOptions<'_>,
+) -> String {
+    render_sheet(shape, check, options, [None, None, None, None])
+}
+
+/// Produces a third-angle engineering sheet using exact HLR when available.
+/// Analytic and mesh payloads retain the legacy projections.
+pub fn try_render_drawing_svg(
+    shape: &SolidShape,
+    check: &CheckReport,
+    options: DrawingOptions<'_>,
+) -> Result<String, String> {
+    let projections = [
+        hlr::project(shape, ViewKind::Top)?,
+        hlr::project(shape, ViewKind::Front)?,
+        hlr::project(shape, ViewKind::Right)?,
+        hlr::project(shape, ViewKind::Iso)?,
+    ];
+    Ok(render_sheet(shape, check, options, projections))
+}
+
+fn render_sheet(
+    shape: &SolidShape,
+    check: &CheckReport,
+    options: DrawingOptions<'_>,
+    projections: [Option<HlrProjection>; 4],
 ) -> String {
     let mut pmi: Vec<_> = shape.pmi.iter().chain(options.additional_pmi).collect();
     pmi.dedup();
@@ -70,7 +95,7 @@ pub fn render_drawing_svg(
         escape_xml(&shape.part_name)
     );
     svg.push_str(r##"<defs><marker id="arrow" markerWidth="4" markerHeight="4" refX="3" refY="2" orient="auto-start-reverse" markerUnits="userSpaceOnUse"><path d="M0 0.7 L3 2 L0 3.3" fill="none" stroke="#324050" stroke-width="0.35"/></marker></defs>
-<style>text{font-family:Arial,sans-serif;fill:#142130;font-size:3.6px}.title{font-size:6px;font-weight:bold}.heading{font-weight:bold}.minor{font-size:3.2px}.frame,.table-line,.edge,.outline,.extension,.dimension{fill:none;stroke:#142130}.frame{stroke-width:.55}.table-line{stroke-width:.25}.edge,.outline{stroke-linejoin:round;stroke-linecap:round}.edge{stroke:#687584;stroke-width:.28}.outline{stroke-width:.45}.extension,.dimension{stroke:#324050;stroke-width:.25}.dimension{marker-start:url(#arrow);marker-end:url(#arrow)}</style>
+<style>text{font-family:Arial,sans-serif;fill:#142130;font-size:3.6px}.title{font-size:6px;font-weight:bold}.heading{font-weight:bold}.minor{font-size:3.2px}.frame,.table-line,.edge,.outline,.extension,.dimension{fill:none;stroke:#142130}.frame{stroke-width:.55}.table-line{stroke-width:.25}.edge,.outline{stroke-linejoin:round;stroke-linecap:round}.edge{stroke:#687584;stroke-width:.28}.outline{stroke-width:.45}.visible,.hidden{fill:none;stroke:#142130;stroke-linejoin:round;stroke-linecap:round}.visible{stroke-width:.45}.hidden{stroke-width:.25;stroke-dasharray:2 1}.extension,.dimension{stroke:#324050;stroke-width:.25}.dimension{marker-start:url(#arrow);marker-end:url(#arrow)}</style>
 <rect width="100%" height="100%" fill="white"/>"##);
     let _ = writeln!(
         svg,
@@ -86,7 +111,11 @@ pub fn render_drawing_svg(
         &mut svg,
         16.0,
         29.0,
-        "Third-angle projection · Orthographic wireframe",
+        if projections.iter().any(Option::is_some) {
+            "Third-angle projection · Exact B-Rep hidden-line drawing"
+        } else {
+            "Third-angle projection · Orthographic wireframe"
+        },
     );
 
     let bbox = check.bbox_mm;
@@ -100,7 +129,7 @@ pub fn render_drawing_svg(
         ("right", ViewKind::Right, [309.0, 195.0], scale, 150.0),
         ("iso", ViewKind::Iso, [309.0, 87.0], iso_scale(bbox), 42.0),
     ];
-    for (id, view, center, s, label_y) in projected {
+    for ((id, view, center, s, label_y), exact) in projected.into_iter().zip(&projections) {
         let _ = writeln!(svg, r#"<g id="view-{id}">"#);
         let _ = writeln!(
             svg,
@@ -109,7 +138,7 @@ pub fn render_drawing_svg(
             view.title(),
             if id == "iso" { " · NTS" } else { "" }
         );
-        let bounds = draw_view(&mut svg, shape, bbox, view, center, s);
+        let bounds = draw_view(&mut svg, shape, bbox, view, center, s, exact.as_ref());
         match view {
             ViewKind::Front => horizontal_dimension(&mut svg, bounds, size[0], "Length"),
             ViewKind::Top => vertical_dimension(&mut svg, bounds, size[1], "Width"),
@@ -237,47 +266,33 @@ fn draw_view(
     view: ViewKind,
     center: [f64; 2],
     scale: f64,
+    exact: Option<&HlrProjection>,
 ) -> [f64; 4] {
     let mid = std::array::from_fn(|i| (bb.min[i] + bb.max[i]) * 0.5);
-    let origin = view.project(mid);
+    let project = |p| {
+        if exact.is_some() {
+            hlr::project_point(view, p)
+        } else {
+            let (x, y, _) = view.project(p);
+            [x, y]
+        }
+    };
+    let [ox, oy] = project(mid);
     let projected_to_svg = |[x, y]: [f64; 2]| {
-        [
-            center[0] + (x - origin.0) * scale,
-            center[1] - (y - origin.1) * scale,
-        ]
+        [center[0] + (x - ox) * scale, center[1] - (y - oy) * scale]
     };
-    let to_svg = |p| {
-        let (x, y, _) = view.project(p);
-        projected_to_svg([x, y])
-    };
-    for edge in &shape.edges {
-        let points: Vec<_> = edge
-            .polyline
-            .as_chunks::<3>()
-            .0
-            .iter()
-            .copied()
-            .map(to_svg)
-            .collect();
-        if points.len() < 2 || points.iter().all(|p| *p == points[0]) {
-            continue;
+    let to_svg = |p| projected_to_svg(project(p));
+    if let Some(projection) = exact {
+        hlr::draw_svg(svg, projection, &projected_to_svg);
+        // Only the top view uses these profiles. Front, right, and iso HLR
+        // already has occlusion; a cut profile there would draw hidden holes.
+        // Iso HLR flips X and these profiles do not, so they must not share
+        // that view's frame.
+        if view == ViewKind::Top {
+            draw_projected_outlines(svg, shape, view, &projected_to_svg);
         }
-        svg.push_str("<polyline class=\"edge\" points=\"");
-        for [x, y] in points {
-            let _ = write!(svg, "{x:.3},{y:.3} ");
-        }
-        svg.push_str("\"/>\n");
-    }
-    // Tangent silhouettes (for example the sides of a cylinder when seen
-    // from the front) are not topological B-Rep edges.
-    if let Ok(profiles) = super::dxf::projected_profiles(shape, view) {
-        for profile in profiles {
-            svg.push_str("<polygon class=\"outline\" points=\"");
-            for [x, y] in profile.into_iter().map(projected_to_svg) {
-                let _ = write!(svg, "{x:.3},{y:.3} ");
-            }
-            svg.push_str("\"/>\n");
-        }
+    } else {
+        draw_wireframe(svg, shape, view, to_svg, &projected_to_svg);
     }
     bbox_corners(bb).map(to_svg).iter().fold(
         [
@@ -295,6 +310,58 @@ fn draw_view(
             ]
         },
     )
+}
+
+fn draw_projected_outlines(
+    svg: &mut String,
+    shape: &SolidShape,
+    view: ViewKind,
+    projected_to_svg: &impl Fn([f64; 2]) -> [f64; 2],
+) {
+    match super::dxf::projected_profiles(shape, view) {
+        Ok(profiles) => {
+            for profile in profiles {
+                svg.push_str("<polygon class=\"outline\" points=\"");
+                for [x, y] in profile.into_iter().map(projected_to_svg) {
+                    let _ = write!(svg, "{x:.3},{y:.3} ");
+                }
+                svg.push_str("\"/>\n");
+            }
+        }
+        Err(err) => {
+            let _ = write!(svg, "<!-- projected_profiles failed: {err} -->\n");
+        }
+    }
+}
+
+fn draw_wireframe(
+    svg: &mut String,
+    shape: &SolidShape,
+    view: ViewKind,
+    to_svg: impl Fn([f64; 3]) -> [f64; 2],
+    projected_to_svg: &impl Fn([f64; 2]) -> [f64; 2],
+) {
+    for edge in &shape.edges {
+        let points: Vec<_> = edge
+            .polyline
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .copied()
+            .map(&to_svg)
+            .collect();
+        if points.len() < 2 || points.iter().all(|p| *p == points[0]) {
+            continue;
+        }
+        svg.push_str("<polyline class=\"edge\" points=\"");
+        for [x, y] in points {
+            let _ = write!(svg, "{x:.3},{y:.3} ");
+        }
+        svg.push_str("\"/>\n");
+    }
+    // Tangent silhouettes (for example the sides of a cylinder when seen
+    // from the front) are not topological B-Rep edges.
+    draw_projected_outlines(svg, shape, view, projected_to_svg);
 }
 
 fn horizontal_dimension(svg: &mut String, [l, _, r, b]: [f64; 4], value: f64, label: &str) {
@@ -384,14 +451,45 @@ fn fitted_text(svg: &mut String, x: f64, y: f64, width: f64, value: &str) {
     }
 }
 
+#[derive(serde::Deserialize)]
+struct MaterialCatalog {
+    materials: Vec<MaterialCatalogEntry>,
+}
+
+#[derive(serde::Deserialize)]
+struct MaterialCatalogEntry {
+    id: String,
+    #[serde(default)]
+    aliases: Vec<String>,
+    density_g_cm3: f64,
+}
+
+fn material_catalog() -> &'static [MaterialCatalogEntry] {
+    static CATALOG: std::sync::OnceLock<Vec<MaterialCatalogEntry>> = std::sync::OnceLock::new();
+    CATALOG.get_or_init(|| {
+        let parsed: MaterialCatalog =
+            serde_json::from_str(include_str!("../../../schemas/materials.json"))
+                .expect("schemas/materials.json must be valid JSON");
+        parsed.materials
+    })
+}
+
+/// Handbook density in g/cm³ for the drawing title block.
+///
+/// Loaded from `schemas/materials.json`, the single source of truth shared with
+/// the Studio workbench presets. Unknown designations stay unavailable.
 fn known_density(material: &str) -> Option<f64> {
-    match material.to_ascii_uppercase().as_str() {
-        "AL-6061-T6" => Some(2.70),
-        "AL-7075-T6" => Some(2.81),
-        "SUS304" => Some(7.93),
-        "45# STEEL" => Some(7.85),
-        _ => None,
+    let key = material.trim();
+    if key.is_empty() {
+        return None;
     }
+    material_catalog()
+        .iter()
+        .find(|entry| {
+            entry.id.eq_ignore_ascii_case(key)
+                || entry.aliases.iter().any(|alias| alias.eq_ignore_ascii_case(key))
+        })
+        .map(|entry| entry.density_g_cm3)
 }
 
 pub(super) fn escape_xml(value: &str) -> String {

@@ -6,9 +6,20 @@ license.workspace = true
 
 [features]
 default = []
-wgpu-renderer = []
+wgpu-renderer = ["dep:wgpu", "dep:bytemuck", "dep:png", "dep:pollster"]
 
 [dependencies]
+cad-ir.workspace = true
 cad-kernel-occt.workspace = true
+cad-scene-mesh.workspace = true
 cad-syntax.workspace = true
+cad-topo.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+wgpu = { version = "24.0.3", optional = true }
+bytemuck = { version = "1.21.0", features = ["derive"], optional = true }
+png = { version = "0.17.16", optional = true }
+pollster = { version = "0.4.0", optional = true }
+
+[dev-dependencies]
+cad-evaluator = { path = "../cad-evaluator" }

@@ -1,4 +1,4 @@
-use cad_hir::{HoverInfo, IrExpr, IrSketchStmt, Severity, check_and_lower};
+use cad_hir::{HoverInfo, ImportArgumentHover, IrExpr, IrSketchStmt, Severity, check_and_lower};
 use cad_syntax::{Span, TopItem, parse};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -116,6 +116,7 @@ struct DocState {
     source: String,
     diagnostics: Vec<LspDiagnostic>,
     hover_items: Vec<HoverInfo>,
+    import_argument_hovers: Vec<ImportArgumentHover>,
     symbols: Vec<DocumentSymbol>,
 }
 
@@ -250,6 +251,7 @@ impl LspServerState {
                 source: source.to_owned(),
                 diagnostics: diags,
                 hover_items,
+                import_argument_hovers: hir.import_argument_hovers,
                 symbols,
             },
         );
@@ -318,6 +320,22 @@ impl LspServerState {
             )
             .collect();
         let hover = pos.and_then(|pos| {
+            if let Some(hit) = doc
+                .import_argument_hovers
+                .iter()
+                .find(|hit| range_contains(hit.span.into(), pos))
+            {
+                let parameter = hit.parameter;
+                return Some(QueryHover {
+                    symbol: parameter.name.into(),
+                    dimension_type: parameter.ty.to_string(),
+                    summary: format!(
+                        "**`{}: {}`**\n\n{}",
+                        parameter.name, parameter.ty, parameter.documentation
+                    ),
+                    span: hit.span,
+                });
+            }
             let hit = doc.hover_item(pos.line as usize + 1, pos.character as usize + 1);
             if let Some((token, span)) = token {
                 if let Some(op) = OPERATORS.iter().find(|op| op.name == token) {
@@ -580,6 +598,12 @@ builtins! {
     "line" => "(from: SketchPoint, to: SketchPoint) -> SketchEntity",
     "arc" => "(from: SketchPoint, to: SketchPoint) -> SketchEntity",
     "circle" => "(center: Length[2], d: Length) -> SketchEntity",
+    "ellipse" => "(rx: Length, ry: Length, center?: Length[2], segments?: u32) -> SketchEntity",
+    "profile::ellipse" => "(rx: Length, ry: Length, center?: Length[2], segments?: u32, plane?: Plane) -> Sketch2D",
+    "spline" => "(points: Length[2][], closed?: Bool, segments_per_span?: u32) -> SketchEntity",
+    "profile::spline" => "(points: Length[2][], closed?: Bool, segments_per_span?: u32, plane?: Plane) -> Sketch2D",
+    "path::helix" => "(radius: Length, pitch: Length, turns?: f64, height?: Length, origin?: Length[3], segments_per_turn?: u32, left_handed?: Bool) -> Path3D",
+    "path::spline3d" => "(points: Length[3][], segments_per_span?: u32) -> Path3D",
     "region::closed" => "(SketchEntity[]) -> Sketch2D",
     "region::path" => "(SketchEntity[]) -> Path",
     "shell" => "(thickness: Length, open_faces?: FaceSet[]) -> Solid",
@@ -596,11 +620,17 @@ builtins! {
     "component" => "(part: Solid, origin?: Length[3], rotation?: Angle[3]) -> Component",
     "mate::coaxial" => "(a: Component, b: Component, axis?: Direction) -> Bool",
     "mate::coincident" => "(a: Component, b: Component, offset?: Length) -> Bool",
-    "tag::faces" => "(tag: String, target: FaceSet) -> Solid",
+    "import::step" => "(path: String, sha256?: String, deflection?: Length, component?: String, allow_open_shell?: Bool, heal?: Bool, sewing_tol?: Length) -> Solid",
+    "import::mesh" => "(path: String, source_unit?: String, sha256?: String, cluster_analytic_faces?: Bool, allow_open_shell?: Bool) -> Solid",
+    "tag::faces" => "(tag: String, faces?: FaceSet) -> Solid | FaceSet (matches pipe input)",
+    "face::offset" => "Solid |> (faces: FaceSet, delta: Length) -> Solid; select one full cylindrical through-hole wall from the input solid. Positive delta grows the radius.",
+    "face::move" => "Solid |> (faces: FaceSet, offset: [Length, Length, Length]) -> Solid; move a full cylindrical through-hole perpendicular to its axis.",
+    "face::delete" => "Solid |> (faces: FaceSet) -> Solid; fill a full cylindrical through-hole on the input solid.",
     "pmi::datum" => "(label: String)",
     "pmi::flatness" => "(tol: Length)",
     "pmi::perpendicularity" => "(datum: String, tol: Length)",
     "assert::bbox" => "(target: Solid, max_size: Length[3]) -> Bool",
+    "assert::no_interference" => "(a: Solid | Component, b: Solid | Component, min_clearance: Length) -> Bool; requires exact OCCT solids. Use 0mm for overlap only.",
 }
 
 impl LspServerState {

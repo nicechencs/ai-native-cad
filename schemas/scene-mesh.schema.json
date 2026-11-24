@@ -30,6 +30,21 @@
       "description": "Placed component instances when kind == 'assembly'; omitted for a single part. Bounding boxes are in world coordinates.",
       "items": { "$ref": "#/$defs/component_meta" }
     },
+    "hole_offsets": {
+      "type": "array",
+      "description": "Verified native through-hole handles on the current part return value. Source positions are zero-based UTF-8 byte offsets.",
+      "items": {
+        "type": "object",
+        "required": ["face_id", "radius_mm", "selector", "return_start", "expression_end"],
+        "properties": {
+          "face_id": { "type": "string", "minLength": 1 },
+          "radius_mm": { "type": "number", "exclusiveMinimum": 0 },
+          "selector": { "type": "string", "minLength": 1 },
+          "return_start": { "type": "integer", "minimum": 0 },
+          "expression_end": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
     "faces": {
       "type": "array",
       "items": {

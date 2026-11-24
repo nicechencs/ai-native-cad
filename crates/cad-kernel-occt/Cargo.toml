@@ -9,6 +9,13 @@ default = []
 occt-ffi = []
 
 [dependencies]
+cad-observe.workspace = true
 cad-syntax.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+cad-observe = { workspace = true, features = ["sink"] }
+tracing-subscriber.workspace = true

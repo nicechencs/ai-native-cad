@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-native-cad.local/schemas/external-interface.schema.json",
+  "title": "CAD-CLI External Asset Inspection Output",
+  "description": "Successful cad-cli inspect --json output. Geometry uses millimeters regardless of the source unit.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "status", "file", "format", "sha256", "unit_detected", "watertight",
+    "bbox_mm", "volume_mm3", "components", "datum_planes", "hole_groups", "cylindrical_bosses"
+  ],
+  "properties": {
+    "status": { "const": "ok" },
+    "file": { "$ref": "#/$defs/nonempty_string" },
+    "format": { "enum": ["STEP", "BREP", "IGES", "STL", "3MF", "OBJ", "GLTF"] },
+    "sha256": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "SHA-256 of the original asset bytes, as lowercase hexadecimal."
+    },
+    "unit_detected": {
+      "enum": ["um", "mm", "cm", "in", "ft", "m", "unknown"],
+      "description": "Source length unit used for conversion (including caller overrides), or unknown when no single source unit is available. Output geometry is always in millimeters; unitless BREP coordinates are assumed to be millimeters."
+    },
+    "watertight": { "type": "boolean" },
+    "bbox_mm": { "$ref": "#/$defs/bbox_mm" },
+    "volume_mm3": { "$ref": "#/$defs/nonnegative_number" },
+    "components": {
+      "type": "array",
+      "description": "Placed component instances, if any. Bounds are in world coordinates.",
+      "items": { "$ref": "#/$defs/component" }
+    },
+    "datum_planes": { "type": "array", "items": { "$ref": "#/$defs/datum_plane" } },
+    "hole_groups": { "type": "array", "items": { "$ref": "#/$defs/hole_group" } },
+    "cylindrical_bosses": { "type": "array", "items": { "$ref": "#/$defs/cylindrical_boss" } }
+  },
+  "$defs": {
+    "nonempty_string": { "type": "string", "minLength": 1 },
+    "nonnegative_number": { "type": "number", "minimum": 0 },
+    "positive_number": { "type": "number", "exclusiveMinimum": 0 },
+    "vec3": {
+      "type": "array",
+      "items": { "type": "number" },
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "bbox_mm": {
+      "type": "object",
+      "description": "Axis-aligned bounding box in millimeters.",
+      "additionalProperties": false,
+      "required": ["min", "max"],
+      "properties": {
+        "min": { "$ref": "#/$defs/vec3" },
+        "max": { "$ref": "#/$defs/vec3" }
+      }
+    },
+    "component": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["component_id", "part_name", "bbox_mm"],
+      "properties": {
+        "component_id": { "$ref": "#/$defs/nonempty_string" },
+        "part_name": { "$ref": "#/$defs/nonempty_string" },
+        "bbox_mm": { "$ref": "#/$defs/bbox_mm" }
+      }
+    },
+    "datum_plane": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "normal", "origin_mm", "area_mm2"],
+      "properties": {
+        "id": { "$ref": "#/$defs/nonempty_string" },
+        "normal": { "$ref": "#/$defs/vec3" },
+        "origin_mm": { "$ref": "#/$defs/vec3" },
+        "area_mm2": { "$ref": "#/$defs/positive_number" }
+      }
+    },
+    "hole_group": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["group_id", "pattern", "count", "diameter_mm", "depth_mm", "axis", "centers_mm"],
+      "properties": {
+        "group_id": { "$ref": "#/$defs/nonempty_string" },
+        "pattern": { "$ref": "#/$defs/nonempty_string" },
+        "count": { "type": "integer", "minimum": 1 },
+        "diameter_mm": { "$ref": "#/$defs/positive_number" },
+        "depth_mm": { "$ref": "#/$defs/positive_number" },
+        "axis": { "$ref": "#/$defs/vec3" },
+        "centers_mm": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/vec3" },
+          "description": "One hole center per counted hole."
+        },
+        "pitch_circle_diameter_mm": {
+          "$ref": "#/$defs/positive_number",
+          "description": "Pitch circle diameter when the detected pattern has one."
+        }
+      }
+    },
+    "cylindrical_boss": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "diameter_mm", "height_mm", "axis", "base_center_mm"],
+      "properties": {
+        "id": { "$ref": "#/$defs/nonempty_string" },
+        "diameter_mm": { "$ref": "#/$defs/positive_number" },
+        "height_mm": { "$ref": "#/$defs/positive_number" },
+        "axis": { "$ref": "#/$defs/vec3" },
+        "base_center_mm": { "$ref": "#/$defs/vec3" }
+      }
+    }
+  }
+}

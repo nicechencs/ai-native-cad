@@ -1,399 +1,384 @@
 use crate::csg::SolidShape;
-use crate::types::{BRepFace, SurfaceType};
+use crate::step_geometry::{self, Body, Circle, Point, Shell, Surface, VertexKey};
 use std::collections::HashMap;
 use std::fmt::Write;
 
-type QuantKey = (i64, i64, i64);
+/// Marker embedded in `FILE_DESCRIPTION` for analytic preview STEP exports so they
+/// can never masquerade as authoritative OCCT B-Rep STEP AP242 deliverables.
+pub const NON_AUTHORITATIVE_STEP_MARKER: &str = "NON-AUTHORITATIVE ANALYTIC PREVIEW";
 
-fn quant_pt(p: [f64; 3]) -> QuantKey {
-    (
-        (p[0] * 10_000.0).round() as i64,
-        (p[1] * 10_000.0).round() as i64,
-        (p[2] * 10_000.0).round() as i64,
-    )
+/// Structured diagnostic code reported when authoritative OCCT STEP AP242 export is requested
+/// on a non-OCCT solid or a build without `occt-ffi`.
+pub const AUTHORITATIVE_KERNEL_REQUIRED_CODE: &str = "AuthoritativeKernelRequired";
+
+/// Provenance authority of a STEP AP242 export payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StepExportAuthority {
+    /// Exported directly from a native OCCT B-Rep solid handle (`occt-ffi`).
+    AuthoritativeOcctBRep,
+    /// Synthesized from the analytic preview kernel; not authoritative for manufacturing delivery.
+    NonAuthoritativeAnalyticPreview,
 }
 
-/// Exports a `SolidShape` into ISO-10303-21 STEP AP242 Part 21 ASCII with complete
-/// topological boundary loops (`VERTEX_POINT`, `EDGE_CURVE`, `ORIENTED_EDGE`, `EDGE_LOOP`,
-/// `FACE_OUTER_BOUND`, `FACE_BOUND`), manufacturing PMI metadata, and Assembly BOM links (R01).
-pub fn export_step_ap242(shape: &SolidShape) -> String {
-    let mut out = String::with_capacity(32768);
-    let part = sanitize_step_str(&shape.part_name);
+/// STEP AP242 export output tagged with its kernel authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StepExportOutput {
+    pub content: String,
+    pub authority: StepExportAuthority,
+}
 
-    let _ = writeln!(out, "ISO-10303-21;");
-    let _ = writeln!(out, "HEADER;");
-    let _ = writeln!(
-        out,
-        "FILE_DESCRIPTION(('AI-Native CAD MVP v0.1 STEP AP242 Export'),'2;1');"
-    );
-    let _ = writeln!(
-        out,
-        "FILE_NAME('{part}.step','2026-11-18T00:00:00',('AI-Native CAD'),('AI-Native CAD Engine'),'cad-kernel-occt 0.1','cad-cli','');"
-    );
-    let _ = writeln!(
-        out,
-        "FILE_SCHEMA(('AP242_MANAGED_MODEL_BASED_3D_ENGINEERING_MIM_LF'));"
-    );
-    let _ = writeln!(out, "ENDSEC;");
-    let _ = writeln!(out, "DATA;");
+/// Exports native B-Rep via OCCT's STEP writer, or analytic preview geometry as STEP AP242.
+pub fn export_step_ap242(shape: &SolidShape) -> Result<String, String> {
+    try_export_step_ap242(shape).map_err(|error| error.to_string())
+}
 
-    let mut next_id = 1usize;
-    let mut alloc = || {
-        let cur = next_id;
-        next_id += 1;
-        cur
-    };
-
-    let app_ctx = alloc();
-    let _ = writeln!(
-        out,
-        "#{app_ctx}=APPLICATION_CONTEXT('managed model based 3d engineering');"
-    );
-    let app_proto = alloc();
-    let _ = writeln!(
-        out,
-        "#{app_proto}=APPLICATION_PROTOCOL_DEFINITION('international standard','ap242_managed_model_based_3d_engineering',2014,#{app_ctx});"
-    );
-    let prod_ctx = alloc();
-    let _ = writeln!(
-        out,
-        "#{prod_ctx}=PRODUCT_CONTEXT('',# {app_ctx},'mechanical');"
-    );
-    let prod_id = alloc();
-    let _ = writeln!(
-        out,
-        "#{prod_id}=PRODUCT('{part}','{part}','',(#{prod_ctx}));"
-    );
-    let pdf_id = alloc();
-    let _ = writeln!(
-        out,
-        "#{pdf_id}=PRODUCT_DEFINITION_FORMATION('1','',#{prod_id});"
-    );
-    let pdef_ctx = alloc();
-    let _ = writeln!(
-        out,
-        "#{pdef_ctx}=PRODUCT_DEFINITION_CONTEXT('part definition',#{app_ctx},'design');"
-    );
-    let pd_id = alloc();
-    let _ = writeln!(
-        out,
-        "#{pd_id}=PRODUCT_DEFINITION('design','',#{pdf_id},#{pdef_ctx});"
-    );
-    let pds_id = alloc();
-    let _ = writeln!(
-        out,
-        "#{pds_id}=PRODUCT_DEFINITION_SHAPE('','',#{pd_id});"
-    );
-
-    let uncert = alloc();
-    let len_unit = alloc();
-    let ang_unit = alloc();
-    let solid_ang_unit = alloc();
-    let shape_rep_ctx = alloc();
-    let _ = writeln!(
-        out,
-        "#{len_unit}=(LENGTH_UNIT()NAMED_UNIT(*)SI_UNIT(.MILLI.,.METRE.));"
-    );
-    let _ = writeln!(
-        out,
-        "#{ang_unit}=(NAMED_UNIT(*)PLANE_ANGLE_UNIT()SI_UNIT($,.RADIAN.));"
-    );
-    let _ = writeln!(
-        out,
-        "#{solid_ang_unit}=(NAMED_UNIT(*)SOLID_ANGLE_UNIT()SI_UNIT($,.STERADIAN.));"
-    );
-    let _ = writeln!(
-        out,
-        "#{uncert}=UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(1.E-04),#{len_unit},'distance_accuracy_value','confusion accuracy');"
-    );
-    let _ = writeln!(
-        out,
-        "#{shape_rep_ctx}=(GEOMETRIC_REPRESENTATION_CONTEXT(3)GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((#{uncert}))GLOBAL_UNIT_ASSIGNED_CONTEXT((#{len_unit},#{ang_unit},#{solid_ang_unit}))REPRESENTATION_CONTEXT('Context3D','3D'));"
-    );
-
-    // Deduplicated vertex points and edge curves across all faces
-    let mut vertex_map: HashMap<QuantKey, usize> = HashMap::new();
-    let mut edge_map: HashMap<(QuantKey, QuantKey), usize> = HashMap::new();
-
-    let mut face_ids = Vec::with_capacity(shape.faces.len());
-    for face in &shape.faces {
-        let adv_face_id = emit_advanced_face(
-            face,
-            &mut out,
-            &mut alloc,
-            &mut vertex_map,
-            &mut edge_map,
-        );
-        face_ids.push(adv_face_id);
+/// Exports STEP AP242 strictly requiring an authoritative native OCCT B-Rep payload.
+///
+/// Analytic preview solids and builds without `occt-ffi` are rejected with an
+/// [`AUTHORITATIVE_KERNEL_REQUIRED_CODE`] diagnostic so approximate geometry can never
+/// masquerade as authoritative STEP AP242.
+pub fn try_export_authoritative_step_ap242(
+    shape: &SolidShape,
+) -> Result<StepExportOutput, crate::KernelOperationError> {
+    #[cfg(feature = "occt-ffi")]
+    if let crate::KernelPayload::Occt(handle) = &shape.payload {
+        let content = handle.export_step(&shape.part_name)?;
+        return Ok(StepExportOutput {
+            content,
+            authority: StepExportAuthority::AuthoritativeOcctBRep,
+        });
     }
+    #[cfg(not(feature = "occt-ffi"))]
+    let _ = shape;
+    Err(crate::KernelError::OperationFailed(format!(
+        "{AUTHORITATIVE_KERNEL_REQUIRED_CODE}: authoritative OCCT B-Rep kernel is required for precision STEP AP242 export; analytic preview cannot masquerade as authoritative STEP"
+    ))
+    .into())
+}
 
-    let shell_id = alloc();
-    let face_refs: Vec<String> = face_ids.iter().map(|i| format!("#{i}")).collect();
-    let _ = writeln!(
-        out,
-        "#{shell_id}=CLOSED_SHELL('',({}));",
-        face_refs.join(",")
-    );
-    let brep_id = alloc();
-    let _ = writeln!(
-        out,
-        "#{brep_id}=MANIFOLD_SOLID_BREP('{part}',#{shell_id});"
-    );
-    let rep_id = alloc();
-    let _ = writeln!(
-        out,
-        "#{rep_id}=ADVANCED_BREP_SHAPE_REPRESENTATION('{part}',(#{brep_id}),#{shape_rep_ctx});"
-    );
-    let sdr_id = alloc();
-    let _ = writeln!(
-        out,
-        "#{sdr_id}=SHAPE_DEFINITION_REPRESENTATION(#{pds_id},#{rep_id});"
-    );
+/// Exports STEP AP242 and returns explicit [`StepExportAuthority`] provenance alongside the content.
+pub fn try_export_step_ap242_with_authority(
+    shape: &SolidShape,
+) -> Result<StepExportOutput, crate::KernelOperationError> {
+    #[cfg(feature = "occt-ffi")]
+    if let crate::KernelPayload::Occt(handle) = &shape.payload {
+        let content = handle.export_step(&shape.part_name)?;
+        return Ok(StepExportOutput {
+            content,
+            authority: StepExportAuthority::AuthoritativeOcctBRep,
+        });
+    }
+    let content = export_analytic_step(shape)
+        .map_err(crate::KernelError::OperationFailed)?;
+    Ok(StepExportOutput {
+        content,
+        authority: StepExportAuthority::NonAuthoritativeAnalyticPreview,
+    })
+}
 
-    // Assembly hierarchy & NEXT_ASSEMBLY_USAGE_OCCURRENCE when multiple components exist
-    if !shape.components.is_empty() {
+/// Exports STEP AP242 with the native diagnostic preserved on failure.
+pub fn try_export_step_ap242(shape: &SolidShape) -> Result<String, crate::KernelOperationError> {
+    try_export_step_ap242_with_authority(shape).map(|output| output.content)
+}
+
+fn export_analytic_step(shape: &SolidShape) -> Result<String, String> {
+    let part = sanitize_step_str(&shape.part_name);
+    let mut step = StepFile {
+        out: format!("ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION(('AI-Native CAD STEP AP242 Export ({NON_AUTHORITATIVE_STEP_MARKER})'),'2;1');\nFILE_NAME('{part}.step','2026-11-18T00:00:00',('AI-Native CAD'),('AI-Native CAD Engine'),'cad-kernel-occt 0.1','cad-cli','');\nFILE_SCHEMA(('AP242_MANAGED_MODEL_BASED_3D_ENGINEERING_MIM_LF'));\nENDSEC;\nDATA;\n"),
+        id: 0,
+    };
+    let app = step.entity(format_args!(
+        "APPLICATION_CONTEXT('managed model based 3d engineering')"
+    ));
+    step.entity(format_args!("APPLICATION_PROTOCOL_DEFINITION('international standard','ap242_managed_model_based_3d_engineering',2014,#{app})"));
+    let product_context = step.entity(format_args!("PRODUCT_CONTEXT('',#{app},'mechanical')"));
+    let definition_context = step.entity(format_args!(
+        "PRODUCT_DEFINITION_CONTEXT('part definition',#{app},'design')"
+    ));
+    let length = step.entity(format_args!(
+        "(LENGTH_UNIT()NAMED_UNIT(*)SI_UNIT(.MILLI.,.METRE.))"
+    ));
+    let angle = step.entity(format_args!(
+        "(NAMED_UNIT(*)PLANE_ANGLE_UNIT()SI_UNIT($,.RADIAN.))"
+    ));
+    let solid_angle = step.entity(format_args!(
+        "(NAMED_UNIT(*)SOLID_ANGLE_UNIT()SI_UNIT($,.STERADIAN.))"
+    ));
+    let uncertainty = step.entity(format_args!("UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(1.E-04),#{length},'distance_accuracy_value','confusion accuracy')"));
+    let context = step.entity(format_args!("(GEOMETRIC_REPRESENTATION_CONTEXT(3)GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((#{uncertainty}))GLOBAL_UNIT_ASSIGNED_CONTEXT((#{length},#{angle},#{solid_angle}))REPRESENTATION_CONTEXT('Context3D','3D'))"));
+    let placement = step.axis([0.; 3], [0., 0., 1.], [1., 0., 0.]);
+    let root = step.product(&part, product_context, definition_context);
+
+    if shape.components.is_empty() {
+        let bodies = step_geometry::prepare_bodies(&shape.faces)?;
+        step.solid_representation(&part, root, context, placement, &bodies);
+    } else {
+        let parent_rep = step.entity(format_args!(
+            "SHAPE_REPRESENTATION('{part}',(#{placement}),#{context})"
+        ));
+        step.link_shape(root, parent_rep);
         for comp in &shape.components {
-            let cid = sanitize_step_str(&comp.component_id);
-            let cname = sanitize_step_str(&comp.part_name);
-            let c_prod = alloc();
-            let _ = writeln!(
-                out,
-                "#{c_prod}=PRODUCT('{cname}','{cname}','Component {cid}',(#{prod_ctx}));"
-            );
-            let c_pdf = alloc();
-            let _ = writeln!(
-                out,
-                "#{c_pdf}=PRODUCT_DEFINITION_FORMATION('1','',#{c_prod});"
-            );
-            let c_pd = alloc();
-            let _ = writeln!(
-                out,
-                "#{c_pd}=PRODUCT_DEFINITION('design','',#{c_pdf},#{pdef_ctx});"
-            );
-            let nauo = alloc();
-            let _ = writeln!(
-                out,
-                "#{nauo}=NEXT_ASSEMBLY_USAGE_OCCURRENCE('{cid}','{cname}','',#{pd_id},#{c_pd},$);"
-            );
-            let pt_o = alloc();
-            let _ = writeln!(
-                out,
-                "#{pt_o}=CARTESIAN_POINT('',({:.4},{:.4},{:.4}));",
-                comp.origin_mm[0], comp.origin_mm[1], comp.origin_mm[2]
-            );
-            let ax_o = alloc();
-            let dz = alloc();
-            let dx = alloc();
-            let _ = writeln!(out, "#{dz}=DIRECTION('',(0.,0.,1.));");
-            let _ = writeln!(out, "#{dx}=DIRECTION('',(1.,0.,0.));");
-            let _ = writeln!(
-                out,
-                "#{ax_o}=AXIS2_PLACEMENT_3D('{cid}_placement',#{pt_o},#{dz},#{dx});"
-            );
+            let id = sanitize_step_str(&comp.component_id);
+            let name = sanitize_step_str(&comp.part_name);
+            let bodies =
+                step_geometry::prepare_bodies(shape.faces.iter().filter(|face| {
+                    face.component_id.as_deref() == Some(comp.component_id.as_str())
+                }))
+                .map_err(|error| format!("component {id}: {error}"))?;
+            let child = step.product(&name, product_context, definition_context);
+            let child_rep = step.solid_representation(&name, child, context, placement, &bodies);
+            let usage = step.entity(format_args!(
+                "NEXT_ASSEMBLY_USAGE_OCCURRENCE('{id}','{name}','',#{root},#{child},$)"
+            ));
+            let usage_shape = step.entity(format_args!("PRODUCT_DEFINITION_SHAPE('','',#{usage})"));
+            // Component faces already carry the evaluated assembly placement.
+            let transform = step.entity(format_args!(
+                "ITEM_DEFINED_TRANSFORMATION('','',#{placement},#{placement})"
+            ));
+            let relation = step.entity(format_args!("(REPRESENTATION_RELATIONSHIP('','',#{child_rep},#{parent_rep})REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION(#{transform})SHAPE_REPRESENTATION_RELATIONSHIP())"));
+            step.entity(format_args!(
+                "CONTEXT_DEPENDENT_SHAPE_REPRESENTATION(#{relation},#{usage_shape})"
+            ));
         }
     }
 
-    // Semantic PMI and CAM feature metadata
     for pmi in &shape.pmi {
-        let pmi_id = alloc();
         let kind = sanitize_step_str(&pmi.kind);
         let label = sanitize_step_str(&pmi.label);
         let tol = pmi.tolerance_mm.unwrap_or(0.0);
-        let _ = writeln!(
-            out,
-            "#{pmi_id}=DESCRIPTIVE_REPRESENTATION_ITEM('PMI_{kind}','{label} tol={tol:.4}mm');"
-        );
+        step.entity(format_args!(
+            "DESCRIPTIVE_REPRESENTATION_ITEM('PMI_{kind}','{label} tol={tol:.4}mm')"
+        ));
     }
-
-    let _ = writeln!(out, "ENDSEC;");
-    let _ = writeln!(out, "END-ISO-10303-21;");
-    out
+    step.out.push_str("ENDSEC;\nEND-ISO-10303-21;\n");
+    Ok(step.out)
 }
 
-fn emit_advanced_face(
-    face: &BRepFace,
-    out: &mut String,
-    alloc: &mut impl FnMut() -> usize,
-    vertex_map: &mut HashMap<QuantKey, usize>,
-    edge_map: &mut HashMap<(QuantKey, QuantKey), usize>,
-) -> usize {
-    let mut bound_ids = Vec::new();
-
-    if face.outer_loop.len() >= 3 {
-        let loop_id = emit_edge_loop(&face.outer_loop, out, alloc, vertex_map, edge_map);
-        let b_id = alloc();
-        let _ = writeln!(out, "#{b_id}=FACE_OUTER_BOUND('',#{loop_id},.T.);");
-        bound_ids.push(b_id);
-    }
-
-    for inner in &face.inner_loops {
-        if inner.len() >= 3 {
-            let loop_id = emit_edge_loop(inner, out, alloc, vertex_map, edge_map);
-            let b_id = alloc();
-            let _ = writeln!(out, "#{b_id}=FACE_BOUND('',#{loop_id},.T.);");
-            bound_ids.push(b_id);
-        }
-    }
-    if let Some(top) = &face.top_loop {
-        if top.len() >= 3 {
-            let loop_id = emit_edge_loop(top, out, alloc, vertex_map, edge_map);
-            let b_id = alloc();
-            let _ = writeln!(out, "#{b_id}=FACE_BOUND('',#{loop_id},.T.);");
-            bound_ids.push(b_id);
-        }
-    }
-
-    let pt_id = alloc();
-    let _ = writeln!(
-        out,
-        "#{pt_id}=CARTESIAN_POINT('',({:.4},{:.4},{:.4}));",
-        face.center_hint[0], face.center_hint[1], face.center_hint[2]
-    );
-    let dir_n = alloc();
-    let _ = writeln!(
-        out,
-        "#{dir_n}=DIRECTION('',({:.6},{:.6},{:.6}));",
-        face.normal_hint[0], face.normal_hint[1], face.normal_hint[2]
-    );
-    let ref_d = if face.normal_hint[2].abs() < 0.9 {
-        [0.0, 0.0, 1.0]
-    } else {
-        [1.0, 0.0, 0.0]
-    };
-    let dir_ref = alloc();
-    let _ = writeln!(
-        out,
-        "#{dir_ref}=DIRECTION('',({:.6},{:.6},{:.6}));",
-        ref_d[0], ref_d[1], ref_d[2]
-    );
-    let axis_id = alloc();
-    let _ = writeln!(
-        out,
-        "#{axis_id}=AXIS2_PLACEMENT_3D('',#{pt_id},#{dir_n},#{dir_ref});"
-    );
-
-    let surf_id = alloc();
-    let tag_label = sanitize_step_str(&face.provenance_tags.join(","));
-    match face.surface_type {
-        SurfaceType::Cylinder => {
-            let r = face.radius_hint.unwrap_or(10.0);
-            let _ = writeln!(
-                out,
-                "#{surf_id}=CYLINDRICAL_SURFACE('{tag_label}',#{axis_id},{r:.4});"
-            );
-        }
-        SurfaceType::Cone => {
-            let r = face.radius_hint.unwrap_or(10.0);
-            let _ = writeln!(
-                out,
-                "#{surf_id}=CONICAL_SURFACE('{tag_label}',#{axis_id},{r:.4},0.785398);"
-            );
-        }
-        _ => {
-            let _ = writeln!(out, "#{surf_id}=PLANE('{tag_label}',#{axis_id});");
-        }
-    }
-
-    let bound_refs: Vec<String> = bound_ids.iter().map(|i| format!("#{i}")).collect();
-    let adv_face_id = alloc();
-    let _ = writeln!(
-        out,
-        "#{adv_face_id}=ADVANCED_FACE('{tag_label}',({}),#{surf_id},.T.);",
-        bound_refs.join(",")
-    );
-    adv_face_id
+struct StepFile {
+    out: String,
+    id: usize,
 }
 
-fn emit_edge_loop(
-    pts: &[[f64; 3]],
-    out: &mut String,
-    alloc: &mut impl FnMut() -> usize,
-    vertex_map: &mut HashMap<QuantKey, usize>,
-    edge_map: &mut HashMap<(QuantKey, QuantKey), usize>,
-) -> usize {
-    let mut oriented_edges = Vec::with_capacity(pts.len());
-    let n = pts.len();
-    for i in 0..n {
-        let a = pts[i];
-        let b = pts[(i + 1) % n];
-        let ka = quant_pt(a);
-        let kb = quant_pt(b);
-        if ka == kb {
-            continue;
-        }
-        let va = get_or_insert_vertex(ka, a, out, alloc, vertex_map);
-        let vb = get_or_insert_vertex(kb, b, out, alloc, vertex_map);
+impl StepFile {
+    fn entity(&mut self, definition: std::fmt::Arguments<'_>) -> usize {
+        self.id += 1;
+        let _ = writeln!(self.out, "#{}={definition};", self.id);
+        self.id
+    }
 
-        let (ec_id, same_sense) = if let Some(&existing) = edge_map.get(&(ka, kb)) {
-            (existing, ".T.")
-        } else if let Some(&existing_rev) = edge_map.get(&(kb, ka)) {
-            (existing_rev, ".F.")
+    fn point(&mut self, [x, y, z]: Point) -> usize {
+        self.entity(format_args!(
+            "CARTESIAN_POINT('',({x:.15E},{y:.15E},{z:.15E}))"
+        ))
+    }
+
+    fn direction(&mut self, [x, y, z]: Point) -> usize {
+        self.entity(format_args!("DIRECTION('',({x:.15E},{y:.15E},{z:.15E}))"))
+    }
+
+    fn axis(&mut self, origin: Point, axis: Point, radial: Point) -> usize {
+        let origin = self.point(origin);
+        let axis = self.direction(axis);
+        let radial = self.direction(radial);
+        self.entity(format_args!(
+            "AXIS2_PLACEMENT_3D('',#{origin},#{axis},#{radial})"
+        ))
+    }
+
+    fn product(&mut self, name: &str, product_context: usize, definition_context: usize) -> usize {
+        let product = self.entity(format_args!(
+            "PRODUCT('{name}','{name}','',(#{product_context}))"
+        ));
+        let formation = self.entity(format_args!(
+            "PRODUCT_DEFINITION_FORMATION('1','',#{product})"
+        ));
+        self.entity(format_args!(
+            "PRODUCT_DEFINITION('design','',#{formation},#{definition_context})"
+        ))
+    }
+
+    fn link_shape(&mut self, product: usize, representation: usize) {
+        let definition = self.entity(format_args!("PRODUCT_DEFINITION_SHAPE('','',#{product})"));
+        self.entity(format_args!(
+            "SHAPE_DEFINITION_REPRESENTATION(#{definition},#{representation})"
+        ));
+    }
+
+    fn solid_representation(
+        &mut self,
+        name: &str,
+        product: usize,
+        context: usize,
+        placement: usize,
+        bodies: &[Body<'_>],
+    ) -> usize {
+        let mut items = vec![placement];
+        for body in bodies {
+            let outer = self.shell(&body.outer, false);
+            let solid = if body.voids.is_empty() {
+                self.entity(format_args!("MANIFOLD_SOLID_BREP('{name}',#{outer})"))
+            } else {
+                let voids: Vec<_> = body
+                    .voids
+                    .iter()
+                    .map(|shell| {
+                        let shell = self.shell(shell, true);
+                        self.entity(format_args!("ORIENTED_CLOSED_SHELL('',*,#{shell},.F.)"))
+                    })
+                    .collect();
+                self.entity(format_args!(
+                    "BREP_WITH_VOIDS('{name}',#{outer},({}))",
+                    refs(&voids)
+                ))
+            };
+            items.push(solid);
+        }
+        let rep = self.entity(format_args!(
+            "ADVANCED_BREP_SHAPE_REPRESENTATION('{name}',({}),#{context})",
+            refs(&items)
+        ));
+        self.link_shape(product, rep);
+        rep
+    }
+
+    fn shell(&mut self, shell: &Shell<'_>, reverse: bool) -> usize {
+        let mut vertices = HashMap::new();
+        let mut edges = HashMap::new();
+        let mut faces = Vec::with_capacity(shell.faces.len());
+        for face in &shell.faces {
+            let mut bounds = Vec::new();
+            for (i, ring) in face.loops.iter().enumerate() {
+                let mut oriented = Vec::new();
+                let mut append = |a, b| {
+                    let key = step_geometry::edge_key(a, b);
+                    let forward = step_geometry::vertex_key(a) == key.0;
+                    let edge = *edges.entry(key).or_insert_with(|| {
+                        let (a, b) = if forward { (a, b) } else { (b, a) };
+                        self.edge(a, b, shell.arcs.get(&key).copied(), &mut vertices)
+                    });
+                    oriented.push(self.entity(format_args!(
+                        "ORIENTED_EDGE('',*,*,#{edge},{})",
+                        logical(forward)
+                    )));
+                };
+                if reverse {
+                    for index in (0..ring.len()).rev() {
+                        append(ring[(index + 1) % ring.len()], ring[index]);
+                    }
+                } else {
+                    for (a, b) in step_geometry::loop_edges(ring) {
+                        append(a, b);
+                    }
+                }
+                let wire = self.entity(format_args!("EDGE_LOOP('',({}))", refs(&oriented)));
+                let bound_type = if i == 0 {
+                    "FACE_OUTER_BOUND"
+                } else {
+                    "FACE_BOUND"
+                };
+                bounds.push(self.entity(format_args!("{bound_type}('',#{wire},.T.)")));
+            }
+            let label = sanitize_step_str(&face.source.provenance_tags.join(","));
+            let (surface, outward) = match face.surface {
+                Surface::Plane { origin, normal } => {
+                    let reference = if normal[2].abs() < 0.9 {
+                        [0., 0., 1.]
+                    } else {
+                        [1., 0., 0.]
+                    };
+                    let axis = self.axis(origin, normal, step_geometry::cross(reference, normal));
+                    (self.entity(format_args!("PLANE('{label}',#{axis})")), true)
+                }
+                Surface::Round {
+                    origin,
+                    axis,
+                    radial,
+                    radius,
+                    semi_angle,
+                    outward,
+                } => {
+                    let axis = self.axis(origin, axis, radial);
+                    let surface = if semi_angle == 0. {
+                        self.entity(format_args!(
+                            "CYLINDRICAL_SURFACE('{label}',#{axis},{radius:.15E})"
+                        ))
+                    } else {
+                        self.entity(format_args!(
+                            "CONICAL_SURFACE('{label}',#{axis},{radius:.15E},{semi_angle:.15E})"
+                        ))
+                    };
+                    (surface, outward)
+                }
+            };
+            faces.push(self.entity(format_args!(
+                "ADVANCED_FACE('{label}',({}),#{surface},{})",
+                refs(&bounds),
+                logical(outward != reverse)
+            )));
+        }
+        self.entity(format_args!("CLOSED_SHELL('',({}))", refs(&faces)))
+    }
+
+    fn edge(
+        &mut self,
+        a: Point,
+        b: Point,
+        arc: Option<Circle>,
+        vertices: &mut HashMap<VertexKey, (usize, Point)>,
+    ) -> usize {
+        let [(start, a), (end, b)] = [a, b].map(|p| {
+            *vertices
+                .entry(step_geometry::vertex_key(p))
+                .or_insert_with(|| {
+                    let pt = self.point(p);
+                    (self.entity(format_args!("VERTEX_POINT('',#{pt})")), p)
+                })
+        });
+        let curve = if let Some(Circle {
+            center,
+            axis,
+            radius,
+        }) = arc
+        {
+            let ra = step_geometry::sub(a, center);
+            let rb = step_geometry::sub(b, center);
+            let cross = step_geometry::cross(ra, rb);
+            let orientation: f64 = axis.iter().zip(cross).map(|(x, y)| x * y).sum();
+            let axis = if orientation < 0. {
+                axis.map(|x| -x)
+            } else {
+                axis
+            };
+            let placement = self.axis(center, axis, ra);
+            self.entity(format_args!("CIRCLE('',#{placement},{radius:.15E})"))
         } else {
-            let dx = b[0] - a[0];
-            let dy = b[1] - a[1];
-            let dz = b[2] - a[2];
-            let len = (dx * dx + dy * dy + dz * dz).sqrt().max(1e-9);
-            let p_id = alloc();
-            let _ = writeln!(
-                out,
-                "#{p_id}=CARTESIAN_POINT('',({:.4},{:.4},{:.4}));",
-                a[0], a[1], a[2]
-            );
-            let d_id = alloc();
-            let _ = writeln!(
-                out,
-                "#{d_id}=DIRECTION('',({:.6},{:.6},{:.6}));",
-                dx / len,
-                dy / len,
-                dz / len
-            );
-            let v_id = alloc();
-            let _ = writeln!(out, "#{v_id}=VECTOR('',#{d_id},{len:.4});");
-            let l_id = alloc();
-            let _ = writeln!(out, "#{l_id}=LINE('',#{p_id},#{v_id});");
-            let ec = alloc();
-            let _ = writeln!(out, "#{ec}=EDGE_CURVE('',#{va},#{vb},#{l_id},.T.);");
-            edge_map.insert((ka, kb), ec);
-            (ec, ".T.")
+            let change = step_geometry::sub(b, a);
+            let length = step_geometry::length(change);
+            let point = self.point(a);
+            let dir = self.direction(change.map(|x| x / length));
+            let vector = self.entity(format_args!("VECTOR('',#{dir},{length:.15E})"));
+            self.entity(format_args!("LINE('',#{point},#{vector})"))
         };
-
-        let oe = alloc();
-        let _ = writeln!(out, "#{oe}=ORIENTED_EDGE('',*,*,#{ec_id},{same_sense});");
-        oriented_edges.push(format!("#{oe}"));
+        self.entity(format_args!("EDGE_CURVE('',#{start},#{end},#{curve},.T.)"))
     }
-    let loop_id = alloc();
-    let _ = writeln!(
-        out,
-        "#{loop_id}=EDGE_LOOP('',({}));",
-        oriented_edges.join(",")
-    );
-    loop_id
 }
 
-fn get_or_insert_vertex(
-    key: QuantKey,
-    p: [f64; 3],
-    out: &mut String,
-    alloc: &mut impl FnMut() -> usize,
-    vertex_map: &mut HashMap<QuantKey, usize>,
-) -> usize {
-    if let Some(&vid) = vertex_map.get(&key) {
-        return vid;
+fn refs(ids: &[usize]) -> String {
+    ids.iter()
+        .map(|id| format!("#{id}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn logical(value: bool) -> &'static str {
+    if value {
+        ".T."
+    } else {
+        ".F."
     }
-    let cp_id = alloc();
-    let _ = writeln!(
-        out,
-        "#{cp_id}=CARTESIAN_POINT('',({:.4},{:.4},{:.4}));",
-        p[0], p[1], p[2]
-    );
-    let vp_id = alloc();
-    let _ = writeln!(out, "#{vp_id}=VERTEX_POINT('',#{cp_id});");
-    vertex_map.insert(key, vp_id);
-    vp_id
 }
 
 fn sanitize_step_str(s: &str) -> String {
-    s.chars()
-        .map(|c| if c == '\'' { '_' } else { c })
-        .collect()
+    s.chars().map(|c| if c == '\'' { '_' } else { c }).collect()
 }

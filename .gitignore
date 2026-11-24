@@ -31,6 +31,8 @@ cpp/occt-prebuilt/
 # Temporary CAD build & export artifacts
 *.step
 *.stp
+# Five representative Creo lattices stay in git for import tests.
+!tests/fixtures/step-lattices/*.stp
 *.stl
 *.3mf
 *.iges
@@ -41,6 +43,7 @@ cpp/occt-prebuilt/
 *.pdf
 tmp_out/
 artifacts_out/
+.studio-workspace/
 
 # IDE & OS
 .DS_Store
@@ -59,3 +62,14 @@ Thumbs.db
 !dsl-spec/**
 !schemas/
 !schemas/**
+
+# Public import/export QA downloads, isolated workspaces and run evidence
+/artifacts/import-export/
+/artifacts/functional/
+/artifacts/stp-import-visual/
+test-results/
+playwright-report/
+
+# Portable UI evidence stays local (screenshots are bundled separately for review)
+/docs/qa/import-export-evidence/
+temp/AI_Native_CAD_V2.md
