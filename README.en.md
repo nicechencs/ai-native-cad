@@ -70,7 +70,7 @@ pnpm dev:server
 # Terminal 2 (macOS/Linux: CAD_STUDIO_API_PROXY=http://127.0.0.1:4173 pnpm dev)
 ```
 
-The Tauri v2 desktop workbench links the Rust runtime in-process over native IPC and does not require the Node API server. See [Getting Started](docs/en/getting-started.md).
+The Tauri v2 desktop workbench links the Rust runtime in-process over native IPC and does not require the Node API server. See [Getting Started](docs/en/getting-started.md). Pushing a `v*` tag or triggering **Release Portable Bundles** (`.github/workflows/release.yml`) in GitHub Actions automatically builds and verifies Windows, Linux, and macOS portable bundles (desktop app, `cad-cli`, OCCT shared libraries, and `SHA256SUMS.txt`).
 
 ### 3. Run Python SDK Examples & External Agent Preflight
 

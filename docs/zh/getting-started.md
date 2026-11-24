@@ -144,6 +144,12 @@ pnpm build:desktop
 
 Linux / macOS 对应脚本为 `./scripts/package-release.sh`（支持 `--dry-run`、`--cli-only`、`--without-occt`）。
 
+### GitHub Actions 自动打包与发布（Windows / Linux / macOS）
+
+公开仓库内置 `.github/workflows/release.yml`，支持两种自动出包方式（默认包含权威 OCCT 7.9+ 动态库、Tauri 桌面端、`cad-cli`、`services/cad-agent` 与 `SHA256SUMS.txt`）：
+- **打版本标签自动发布**：推送 `v*` 标签（如 `git tag v0.1.0 && git push origin v0.1.0`）自动并行构建 Windows x64（`.zip`）、Linux x64（`.tar.gz`）与 macOS arm64（`.tar.gz`）便携包，经隔离运行时自检通过后自动创建 GitHub Release。
+- **Actions 手动触发**：在 GitHub Actions 页面运行 **Release Portable Bundles**，可按需勾选 `with_occt`、`cli_only` 与 `publish_release`（草稿 Release），产物默认作为 Workflow Artifacts 保留 30 天。
+
 ---
 
 ## 5. 安装 Python SDK 与运行示例

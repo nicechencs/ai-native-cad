@@ -4,6 +4,11 @@ import react from "@vitejs/plugin-react";
 export default defineConfig({
   plugins: [react()],
   clearScreen: false,
+  optimizeDeps: {
+    // The STEP reader loads in a lazy worker. Discover it before the first import
+    // so dependency optimization cannot reload the page and clear its in-memory file.
+    include: ["occt-import-js"],
+  },
   server: {
     port: 5173,
     strictPort: true,

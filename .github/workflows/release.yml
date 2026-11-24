@@ -1,0 +1,300 @@
+name: Release Portable Bundles
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      with_occt:
+        description: "Bundle authoritative OCCT 7.9+ dynamic libraries (LGPL-2.1)"
+        type: boolean
+        default: true
+      cli_only:
+        description: "Package cad-cli only (skip Tauri desktop workbench)"
+        type: boolean
+        default: false
+      publish_release:
+        description: "Publish a draft GitHub Release from this manual run"
+        type: boolean
+        default: false
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  package:
+    name: Package (${{ matrix.target_name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target_name: windows-x64
+            archive_ext: zip
+          - os: ubuntu-latest
+            target_name: linux-x64
+            archive_ext: tar.gz
+          - os: macos-14
+            target_name: macos-arm64
+            archive_ext: tar.gz
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.target_name }}
+          workspaces: |
+            . -> target
+            apps/desktop/src-tauri -> apps/desktop/src-tauri/target
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.4.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Determine packaging options
+        id: opts
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "with_occt=${{ inputs.with_occt }}" >> "$GITHUB_OUTPUT"
+            echo "cli_only=${{ inputs.cli_only }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "with_occt=true" >> "$GITHUB_OUTPUT"
+            echo "cli_only=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install Linux Tauri & CMake dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build g++ pkg-config libssl-dev \
+            libgl1-mesa-dev libxi-dev libxmu-dev \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+
+      - name: Install frontend dependencies
+        if: steps.opts.outputs.cli_only != 'true'
+        run: pnpm install --frozen-lockfile
+
+      - name: Set up micromamba for OCCT
+        if: steps.opts.outputs.with_occt == 'true'
+        uses: mamba-org/setup-micromamba@v2
+        with:
+          micromamba-version: latest
+          init-shell: ${{ runner.os == 'Windows' && 'pwsh' || 'bash' }}
+
+      - name: Cache prebuilt OCCT
+        id: occt-cache
+        if: steps.opts.outputs.with_occt == 'true'
+        uses: actions/cache@v4
+        with:
+          path: cpp/occt-prebuilt
+          key: occt-prebuilt-7.9-${{ matrix.target_name }}-${{ hashFiles('scripts/fetch-occt-prebuilt.ps1', 'scripts/fetch-occt-prebuilt.sh') }}
+
+      - name: Fetch prebuilt OCCT (Windows)
+        if: runner.os == 'Windows' && steps.opts.outputs.with_occt == 'true' && steps.occt-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: ./scripts/fetch-occt-prebuilt.ps1 -OcctVersion 7.9
+
+      - name: Fetch prebuilt OCCT (Linux / macOS)
+        if: runner.os != 'Windows' && steps.opts.outputs.with_occt == 'true' && steps.occt-cache.outputs.cache-hit != 'true'
+        shell: bash -el {0}
+        run: ./scripts/fetch-occt-prebuilt.sh --version 7.9
+
+      - name: Build occt-bridge (Windows)
+        if: runner.os == 'Windows' && steps.opts.outputs.with_occt == 'true'
+        shell: pwsh
+        run: |
+          $prefix = (Resolve-Path cpp/occt-prebuilt/Library).Path
+          $cmakeArgs = @("-S", "cpp/occt-bridge", "-B", "build/occt-bridge", "-DCMAKE_PREFIX_PATH=$prefix")
+          foreach ($candidate in @("cpp/occt-prebuilt/Library/lib/cmake/opencascade", "cpp/occt-prebuilt/Library/cmake")) {
+            if (Test-Path -LiteralPath (Join-Path $candidate "OpenCASCADEConfig.cmake")) {
+              $cmakeArgs += "-DOpenCASCADE_DIR=$((Resolve-Path $candidate).Path)"
+              break
+            }
+          }
+          cmake @cmakeArgs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build build/occt-bridge --config Release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build occt-bridge (Linux / macOS)
+        if: runner.os != 'Windows' && steps.opts.outputs.with_occt == 'true'
+        shell: bash -el {0}
+        run: |
+          OCCT_PREFIX="$PWD/cpp/occt-prebuilt"
+          GEN_ARGS=()
+          if command -v ninja >/dev/null 2>&1; then
+            GEN_ARGS=(-G Ninja)
+          fi
+          cmake -S cpp/occt-bridge -B build/occt-bridge "${GEN_ARGS[@]}" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$OCCT_PREFIX" \
+            -DOpenCASCADE_DIR="$OCCT_PREFIX/lib/cmake/opencascade"
+          cmake --build build/occt-bridge --parallel
+
+      - name: Build & package portable bundle (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $pkgArgs = @("-Profile", "release", "-OutDir", "dist/release")
+          if ("${{ steps.opts.outputs.with_occt }}" -eq "true") {
+            $bridgeDir = (Resolve-Path build/occt-bridge/Release).Path
+            $env:OCCT_BRIDGE_LIB_DIR = $bridgeDir
+            $env:PATH = "$bridgeDir;$(Resolve-Path cpp/occt-prebuilt/Library/bin);$(Resolve-Path cpp/occt-prebuilt);$env:PATH"
+            $pkgArgs += "-WithOcct"
+          } else {
+            $pkgArgs += "-WithoutOcct"
+          }
+          if ("${{ steps.opts.outputs.cli_only }}" -eq "true") {
+            $pkgArgs += "-CliOnly"
+          }
+          powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-release.ps1 @pkgArgs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build & package portable bundle (Linux / macOS)
+        if: runner.os != 'Windows'
+        shell: bash -el {0}
+        run: |
+          ARGS=(--profile release --out-dir dist/release)
+          if [[ "${{ steps.opts.outputs.with_occt }}" == "true" ]]; then
+            export OCCT_BRIDGE_LIB_DIR="$PWD/build/occt-bridge"
+            if [[ "$(uname -s)" == "Darwin" ]]; then
+              export DYLD_LIBRARY_PATH="$OCCT_BRIDGE_LIB_DIR:$PWD/cpp/occt-prebuilt/lib:${DYLD_LIBRARY_PATH:-}"
+            else
+              export LD_LIBRARY_PATH="$OCCT_BRIDGE_LIB_DIR:$PWD/cpp/occt-prebuilt/lib:${LD_LIBRARY_PATH:-}"
+            fi
+            ARGS+=(--with-occt)
+          else
+            ARGS+=(--without-occt)
+          fi
+          if [[ "${{ steps.opts.outputs.cli_only }}" == "true" ]]; then
+            ARGS+=(--cli-only)
+          fi
+          ./scripts/package-release.sh "${ARGS[@]}"
+
+      - name: Smoke-verify packaged bundle (isolated runtime check)
+        shell: bash
+        run: |
+          PY_BIN=$(command -v python3 || command -v python)
+          "$PY_BIN" - <<'PY'
+          import json, os, subprocess, sys
+          from pathlib import Path
+
+          with_occt = "${{ steps.opts.outputs.with_occt }}" == "true"
+          cli_only = "${{ steps.opts.outputs.cli_only }}" == "true"
+          release_dir = Path("dist/release").resolve()
+          bundle_dirs = [p for p in release_dir.iterdir() if p.is_dir()]
+          assert len(bundle_dirs) == 1, f"Expected 1 bundle dir, found {bundle_dirs}"
+          bundle = bundle_dirs[0]
+
+          exe = ".exe" if os.name == "nt" else ""
+          cli_bin = bundle / f"cad-cli{exe}"
+          desktop_bin = bundle / f"ai-native-cad-desktop{exe}"
+          assert cli_bin.is_file(), f"Missing {cli_bin}"
+          if not cli_only:
+              assert desktop_bin.is_file(), f"Missing {desktop_bin}"
+          assert (bundle / "BUILD-MANIFEST.json").is_file()
+          assert (bundle / "SHA256SUMS.txt").is_file()
+          assert (bundle / "services" / "cad-agent" / "src" / "cad_agent" / "cli.py").is_file()
+
+          # Isolate loader paths to the bundle directory itself so missing bundled libs fail loudly.
+          env = os.environ.copy()
+          if sys.platform == "win32":
+              env["PATH"] = f"{bundle};{env.get('PATH', '')}"
+          elif sys.platform == "darwin":
+              env["DYLD_LIBRARY_PATH"] = str(bundle)
+          else:
+              env["LD_LIBRARY_PATH"] = str(bundle)
+
+          doctor = subprocess.run([str(cli_bin), "doctor-agent", "--json"], env=env, capture_output=True, text=True)
+          assert doctor.returncode == 0, f"doctor-agent failed: {doctor.stdout}\n{doctor.stderr}"
+          doc_json = json.loads(doctor.stdout)
+          assert doc_json.get("status") == "ok", doc_json
+          if with_occt:
+              assert doc_json.get("kernel", {}).get("authoritative") is True, (
+                  f"Expected authoritative OCCT kernel in bundled cad-cli, got: {doc_json}"
+              )
+
+          plate = subprocess.run(
+              [str(cli_bin), "check", "examples/mvp-tier1-plates/01_mounting_plate.kcl", "--json"],
+              env=env, capture_output=True, text=True,
+          )
+          assert plate.returncode == 0, f"01_mounting_plate failed: {plate.stdout}\n{plate.stderr}"
+          assert json.loads(plate.stdout).get("status") == "ok"
+
+          if with_occt:
+              cap = subprocess.run(
+                  [str(cli_bin), "check", "examples/mvp-tier1-plates/05_bearing_end_cap.kcl", "--json"],
+                  env=env, capture_output=True, text=True,
+              )
+              assert cap.returncode == 0, f"05_bearing_end_cap (OCCT) failed: {cap.stdout}\n{cap.stderr}"
+              assert json.loads(cap.stdout).get("status") == "ok"
+
+          print(f"Verified packaged bundle: {bundle.name} (with_occt={with_occt}, cli_only={cli_only})")
+          PY
+
+      - name: Upload portable archive artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-native-cad-${{ matrix.target_name }}
+          path: |
+            dist/release/*.${{ matrix.archive_ext }}
+            dist/release/*/BUILD-MANIFEST.json
+          retention-days: 30
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: [package]
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.publish_release)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+          pattern: ai-native-cad-*
+          merge-multiple: true
+
+      - name: Generate release SHA256SUMS.txt
+        working-directory: release-artifacts
+        run: |
+          ls -la
+          sha256sum *.zip *.tar.gz > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('snapshot-{0}', github.run_number) }}
+          draft: ${{ github.event_name == 'workflow_dispatch' }}
+          generate_release_notes: true
+          files: |
+            release-artifacts/*.zip
+            release-artifacts/*.tar.gz
+            release-artifacts/SHA256SUMS.txt

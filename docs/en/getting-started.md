@@ -144,6 +144,12 @@ pnpm build:desktop
 
 On Linux and macOS, use `./scripts/package-release.sh` (`--dry-run`, `--cli-only`, `--without-occt`).
 
+### Automated GitHub Actions Release Packaging (Windows / Linux / macOS)
+
+The repository includes `.github/workflows/release.yml` for automated cross-platform portable bundles (Tauri desktop app, `cad-cli`, optional authoritative OCCT 7.9+ shared libraries, `services/cad-agent`, and `SHA256SUMS.txt`):
+- **Tag-driven Releases**: Pushing a `v*` tag (for example `git tag v0.1.0 && git push origin v0.1.0`) builds Windows x64 (`.zip`), Linux x64 (`.tar.gz`), and macOS arm64 (`.tar.gz`) bundles, smoke-verifies each packaged `cad-cli` in an isolated library path, and publishes a GitHub Release with combined `SHA256SUMS.txt`.
+- **Manual Workflow Dispatch**: Run **Release Portable Bundles** from the GitHub Actions UI with configurable `with_occt`, `cli_only`, and `publish_release` (draft release) flags; artifacts are retained for 30 days.
+
 ---
 
 ## 5. Install the Python SDK & Run Examples
